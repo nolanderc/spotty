@@ -42,16 +42,16 @@ impl GlyphCache {
             .rasterize(ch)
             .ok_or(RasterizationError::MissingGlyph)?;
 
-        let [x, y] = self
+        let offset = self
             .atlas
             .reserve(
-                2 + rasterized.bitmap.width as usize,
-                2 + rasterized.bitmap.height as usize,
+                rasterized.bitmap.width as usize,
+                rasterized.bitmap.height as usize,
             )
             .ok_or(RasterizationError::AtlasFull)?;
 
         let glyph = Glyph {
-            offset: [x + 1, y + 1],
+            offset,
             size: [
                 rasterized.bitmap.width as u16,
                 rasterized.bitmap.height as u16,

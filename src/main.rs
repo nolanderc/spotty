@@ -1,5 +1,6 @@
 mod font;
 mod render;
+mod tty;
 mod window;
 
 #[derive(Debug)]
@@ -12,7 +13,7 @@ impl Drop for Foo {
 }
 
 fn main() {
-    println!("Hello, world!");
+    let tty = tty::Psuedoterminal::create().unwrap();
 
     let event_loop = window::EventLoop::new();
     let window = window::Window::new(
@@ -29,10 +30,37 @@ fn main() {
 
     let mut needs_redraw = true;
 
+    let (terminal_input, mut terminal_output) = {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        unsafe {
+            let input =
+                std::fs::File::from_raw_fd(nix::unistd::dup(tty.master_fd.as_raw_fd()).unwrap());
+            let output =
+                std::fs::File::from_raw_fd(nix::unistd::dup(tty.master_fd.as_raw_fd()).unwrap());
+
+            (input, std::io::BufReader::new(output))
+        }
+    };
+
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buffer = [0; 8 * 1024];
+        while let Ok(count) = terminal_output.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+
+            let bytes = &buffer[..count];
+            dbg!(String::from_utf8_lossy(bytes));
+        }
+    });
+
     event_loop.run(move |event| match event {
         window::Event::Active => {}
         window::Event::Inactive => {}
         window::Event::Resize(size) => {
+            cursor = [0, 0];
             renderer.resize(size);
             needs_redraw = true;
         }

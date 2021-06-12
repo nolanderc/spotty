@@ -8,7 +8,7 @@ use self::metal as platform;
 
 pub use platform::Renderer;
 
-const FONT_ATLAS_SIZE: usize = 512;
+const FONT_ATLAS_SIZE: usize = 256;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

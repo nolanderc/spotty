@@ -8,8 +8,9 @@ pub struct Renderer {
 
     pipeline: metal::RenderPipelineState,
 
-    vertex_buffer: buffer::Buffer<super::Vertex>,
+    character_vertices: buffer::Buffer<super::Vertex>,
     window_buffer: buffer::Buffer<WindowUniforms>,
+    size: crate::window::PhysicalSize,
 
     glyphs: super::glyph_cache::GlyphCache,
     texture: metal::Texture,
@@ -90,7 +91,7 @@ impl Renderer {
             super::CharacterGrid::in_window(inner_size, [metrics.advance, metrics.line_height])
         };
 
-        let vertex_buffer =
+        let character_vertices =
             buffer::Buffer::new(6 * grid.width as usize * grid.height as usize, &device);
 
         let window_buffer = {
@@ -118,8 +119,9 @@ impl Renderer {
             queue,
             layer,
             pipeline,
-            vertex_buffer,
+            character_vertices,
             window_buffer,
+            size: inner_size,
 
             glyphs: super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE),
             texture,
@@ -130,11 +132,27 @@ impl Renderer {
 
     pub fn resize(&mut self, size: crate::window::PhysicalSize) {
         eprintln!("resize: {}x{}", size.width, size.height);
+        self.size = size;
+
         self.layer
             .set_drawable_size(metal::CGSize::new(size.width as f64, size.height as f64));
+
         self.window_buffer.modify(0..1, |uniforms| {
             uniforms[0].size = [size.width as f32, size.height as f32]
         });
+
+        self.resize_grid();
+    }
+
+    fn resize_grid(&mut self) {
+        let metrics = self.glyphs.font().metrics();
+        self.grid =
+            super::CharacterGrid::in_window(self.size, [metrics.advance, metrics.line_height]);
+
+        self.character_vertices = buffer::Buffer::new(
+            6 * self.grid.width as usize * self.grid.height as usize,
+            &self.device,
+        );
     }
 
     pub fn grid(&mut self) -> &mut super::CharacterGrid {
@@ -148,43 +166,83 @@ impl Renderer {
     pub fn render(&mut self) {
         eprintln!("render");
 
-        self.update_vertex_buffer();
+        self.update_character_vertices();
 
         let drawable = self.layer.next_drawable().unwrap();
 
         let command_buffer = self.queue.new_command_buffer();
-        let encoder = {
-            let desc = metal::RenderPassDescriptor::new();
+        let encoder = Self::create_command_encoder(command_buffer, drawable.texture());
 
-            let attachment = desc.color_attachments().object_at(0).unwrap();
-            attachment.set_texture(Some(drawable.texture()));
-            attachment.set_clear_color(metal::MTLClearColor::new(0.2, 0.2, 0.2, 1.0));
-            attachment.set_load_action(metal::MTLLoadAction::Clear);
-            attachment.set_store_action(metal::MTLStoreAction::Store);
-
-            command_buffer.new_render_command_encoder(&desc)
-        };
-
+        // Render characters
         encoder.set_render_pipeline_state(&self.pipeline);
         encoder.set_fragment_texture(0, Some(&self.texture));
+
+        self.render_characters(encoder);
+        if false {
+            self.render_font_atlas(encoder)
+        }
+
+        encoder.end_encoding();
+        command_buffer.present_drawable(&drawable);
+        command_buffer.commit();
+    }
+
+    fn create_command_encoder<'a>(
+        command_buffer: &'a metal::CommandBufferRef,
+        target: &metal::TextureRef,
+    ) -> &'a metal::RenderCommandEncoderRef {
+        let desc = metal::RenderPassDescriptor::new();
+
+        let attachment = desc.color_attachments().object_at(0).unwrap();
+        attachment.set_texture(Some(target));
+        attachment.set_clear_color(metal::MTLClearColor::new(0.2, 0.2, 0.2, 1.0));
+        attachment.set_load_action(metal::MTLLoadAction::Clear);
+        attachment.set_store_action(metal::MTLStoreAction::Store);
+
+        command_buffer.new_render_command_encoder(&desc)
+    }
+
+    fn render_characters(&self, encoder: &metal::RenderCommandEncoderRef) {
         encoder.set_vertex_buffers(
             0,
-            &[Some(&self.vertex_buffer), Some(&self.window_buffer)],
+            &[Some(&self.character_vertices), Some(&self.window_buffer)],
             &[0; 2],
         );
         encoder.draw_primitives(
             metal::MTLPrimitiveType::Triangle,
             0,
-            self.vertex_buffer.len() as u64,
+            self.character_vertices.len() as u64,
         );
-
-        encoder.end_encoding();
-
-        command_buffer.present_drawable(&drawable);
-        command_buffer.commit();
     }
 
-    fn update_vertex_buffer(&mut self) {
+    fn render_font_atlas(&self, encoder: &metal::RenderCommandEncoderRef) {
+        let atlas_vertices = self.create_atlas_vertices();
+        encoder.set_vertex_buffers(
+            0,
+            &[Some(&atlas_vertices), Some(&self.window_buffer)],
+            &[0; 2],
+        );
+        encoder.draw_primitives(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            atlas_vertices.len() as u64,
+        );
+    }
+
+    fn create_atlas_vertices(&self) -> buffer::Buffer<super::Vertex> {
+        let width = self.size.width as f32;
+        let height = self.size.height as f32;
+
+        let vertices = super::Vertex::quad(
+            [width as f32 - 256.0, width, height - 256.0, height],
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0; 4],
+        );
+
+        buffer::Buffer::with_data(&vertices, &self.device)
+    }
+
+    fn update_character_vertices(&mut self) {
         let mut quads = Vec::<[super::Vertex; 6]>::with_capacity(
             self.grid.width as usize * self.grid.height as usize,
         );
@@ -205,7 +263,8 @@ impl Renderer {
             }
         }
 
-        self.vertex_buffer.write(bytemuck::cast_slice(&quads), 0);
+        self.character_vertices
+            .write(bytemuck::cast_slice(&quads), 0);
     }
 
     fn get_glyph(&mut self, ch: char) -> super::glyph_cache::Glyph {

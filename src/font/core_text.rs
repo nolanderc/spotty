@@ -75,7 +75,7 @@ impl Font {
 
         let raster_descent = (-bounds.origin.y).ceil() as i32;
         let raster_ascent = (bounds.size.height + bounds.origin.y).ceil() as i32;
-        let raster_height = (raster_ascent + raster_descent) as usize;
+        let raster_height = 1 + (raster_ascent + raster_descent) as usize;
 
         let metrics = super::GlyphMetrics {
             ascent: raster_ascent,
