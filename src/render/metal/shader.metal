@@ -29,7 +29,7 @@ vertex VertexOutput vertex_shader(
 
     VertexOutput out;
     out.position = float4(clip.x, -clip.y, 0.0, 1.0);
-    out.color = float4(in.tex_coord, 0.0, 1.0);
+    out.color = in.color;
     out.tex_coord = in.tex_coord;
 
     return out;
@@ -41,6 +41,6 @@ fragment float4 fragment_shader(
 ) {
     constexpr sampler texture_sampler(mag_filter::nearest, min_filter::nearest);
     float4 color = texture.sample(texture_sampler, in.tex_coord);
-    return color;
+    return in.color * color;
 }
 

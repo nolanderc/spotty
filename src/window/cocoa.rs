@@ -12,6 +12,8 @@ pub struct EventLoop {
     app: CocoaId,
 }
 
+pub struct EventLoopWaker;
+
 type EventCallback = Box<dyn FnMut(super::Event)>;
 
 fn default_event_callback(_event: super::Event) {
@@ -90,6 +92,10 @@ impl Window {
 
             Window { raw: window, view }
         }
+    }
+
+    pub fn close(&self) {
+        unsafe { cocoa::appkit::NSWindow::close(self.raw) };
     }
 
     unsafe fn create_class() -> &'static objc::runtime::Class {
@@ -226,6 +232,21 @@ impl EventLoop {
     }
 }
 
+impl EventLoop {
+    pub fn create_waker(&self) -> EventLoopWaker {
+        EventLoopWaker
+    }
+}
+
+impl EventLoopWaker {
+    pub fn wake(&self) {
+        unsafe {
+            let rl = core_foundation::runloop::CFRunLoopGetMain();
+            core_foundation::runloop::CFRunLoopWakeUp(rl);
+        }
+    }
+}
+
 extern "C" fn events_cleared(
     _observer: core_foundation::runloop::CFRunLoopObserverRef,
     _activity: core_foundation::runloop::CFRunLoopActivity,
@@ -265,21 +286,29 @@ extern "C" fn key_down(_this: &Object, _cmd: Sel, event: CocoaId) {
     use cocoa::foundation::NSString;
 
     unsafe {
-        let chars = event.characters();
-        let bytes = chars.UTF8String() as *const u8;
-        let slice = std::slice::from_raw_parts(bytes, chars.len());
+        match event.keyCode() {
+            0x24 => HANDLER.send(super::Event::KeyPress(super::Key::Enter)),
+            0x33 => HANDLER.send(super::Event::KeyPress(super::Key::Backspace)),
+            0x30 => HANDLER.send(super::Event::KeyPress(super::Key::Tab)),
+            _ => {
+                let chars = event.characters();
+                let bytes = chars.UTF8String() as *const u8;
+                let slice = std::slice::from_raw_parts(bytes, chars.len());
 
-        if let Ok(text) = std::str::from_utf8(slice) {
-            for ch in text.chars() {
-                fn is_private_area(ch: char) -> bool {
-                    matches!(u32::from(ch), 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+                if let Ok(text) = std::str::from_utf8(slice) {
+                    for ch in text.chars() {
+                        fn is_private_area(ch: char) -> bool {
+                            matches!(u32::from(ch), 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+                        }
+
+                        if ch.is_control() || is_private_area(ch) {
+                            eprintln!("{:?} : 0x{:x}", ch, event.keyCode());
+                            continue;
+                        }
+
+                        HANDLER.send(super::Event::Char(ch));
+                    }
                 }
-
-                if ch.is_control() || is_private_area(ch) {
-                    continue;
-                }
-
-                HANDLER.send(super::Event::Char(ch));
             }
         }
     }

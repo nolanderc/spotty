@@ -3,7 +3,7 @@ pub mod cocoa;
 #[cfg(target_os = "macos")]
 pub use self::cocoa as platform;
 
-pub use platform::{EventLoop, Window};
+pub use platform::{EventLoop, EventLoopWaker, Window};
 
 #[derive(Debug)]
 pub struct WindowConfig {
@@ -16,8 +16,16 @@ pub enum Event {
     Inactive,
     Resize(PhysicalSize),
     Char(char),
+    KeyPress(Key),
     ScaleFactorChanged,
     EventsCleared,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Key {
+    Enter,
+    Backspace,
+    Tab,
 }
 
 /// A size in physical pixels

@@ -8,7 +8,7 @@ use self::metal as platform;
 
 pub use platform::Renderer;
 
-const FONT_ATLAS_SIZE: usize = 256;
+const FONT_ATLAS_SIZE: usize = 2048;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -114,6 +114,10 @@ impl CharacterGrid {
         CharacterGrid::new(width, height)
     }
 
+    pub fn size(&self) -> [u16; 2] {
+        [self.width, self.height]
+    }
+
     pub fn width(&self) -> u16 {
         self.width
     }
@@ -122,19 +126,47 @@ impl CharacterGrid {
         self.height
     }
 
-    pub fn get(&self, x: u16, y: u16) -> Option<&GridCell> {
-        if x < self.width && y < self.height {
-            Some(&self[[x as u16, y as u16]])
-        } else {
-            None
-        }
+    pub fn scroll_up(&mut self, rows: u16) {
+        let width = self.width as usize;
+        let new_start = width * rows as usize;
+        let new_end = self.cells.len() - new_start;
+
+        self.cells.copy_within(new_start.., 0);
+        self.cells[new_end..].fill(GridCell::empty());
     }
 
-    pub fn get_mut(&mut self, x: u16, y: u16) -> Option<&mut GridCell> {
-        if x < self.width && y < self.height {
-            Some(&mut self[[x as u16, y as u16]])
-        } else {
-            None
+    pub fn clear_region(
+        &mut self,
+        x_range: impl std::ops::RangeBounds<u16>,
+        y_range: impl std::ops::RangeBounds<u16>,
+    ) {
+        fn into_exclusive_range(
+            range: impl std::ops::RangeBounds<u16>,
+            max: u16,
+        ) -> std::ops::Range<u16> {
+            let start = match range.start_bound() {
+                std::ops::Bound::Included(index) => *index,
+                std::ops::Bound::Excluded(index) => *index + 1,
+                std::ops::Bound::Unbounded => 0,
+            };
+
+            let end = match range.start_bound() {
+                std::ops::Bound::Included(index) => *index + 1,
+                std::ops::Bound::Excluded(index) => *index,
+                std::ops::Bound::Unbounded => max,
+            };
+
+            start..end
+        }
+
+        let x_range = into_exclusive_range(x_range, self.width);
+        let y_range = into_exclusive_range(y_range, self.height);
+
+        for y in y_range {
+            let row_index = y as usize * self.width as usize;
+            let start = x_range.start as usize + row_index;
+            let end = x_range.end as usize + row_index;
+            self.cells[start..end].fill(GridCell::empty());
         }
     }
 }
@@ -166,5 +198,11 @@ impl std::ops::IndexMut<[u16; 2]> for CharacterGrid {
             self.height
         );
         &mut self.cells[x as usize + y as usize * self.width as usize]
+    }
+}
+
+impl GridCell {
+    pub fn empty() -> Self {
+        GridCell { character: ' ' }
     }
 }

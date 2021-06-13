@@ -13,9 +13,16 @@ pub struct Renderer {
     size: crate::window::PhysicalSize,
 
     glyphs: super::glyph_cache::GlyphCache,
-    texture: metal::Texture,
+    font_atlas: metal::Texture,
+    white_texture: metal::Texture,
 
     grid: super::CharacterGrid,
+
+    cursor: Cursor,
+}
+
+struct Cursor {
+    position: [u16; 2],
 }
 
 #[repr(C)]
@@ -86,10 +93,7 @@ impl Renderer {
             device.new_render_pipeline_state(&desc).unwrap()
         };
 
-        let grid = {
-            let metrics = font.metrics();
-            super::CharacterGrid::in_window(inner_size, [metrics.advance, metrics.line_height])
-        };
+        let grid = super::CharacterGrid::in_window(inner_size, Self::cell_size(&font));
 
         let character_vertices =
             buffer::Buffer::new(6 * grid.width as usize * grid.height as usize, &device);
@@ -101,7 +105,7 @@ impl Renderer {
             buffer::Buffer::with_data(std::slice::from_ref(&uniforms), &device)
         };
 
-        let texture = {
+        let font_atlas = {
             let desc = metal::TextureDescriptor::new();
 
             desc.set_pixel_format(TEXTURE_FORMAT);
@@ -114,6 +118,26 @@ impl Renderer {
             device.new_texture(&desc)
         };
 
+        let white_texture = {
+            let desc = metal::TextureDescriptor::new();
+
+            desc.set_pixel_format(TEXTURE_FORMAT);
+            desc.set_usage(metal::MTLTextureUsage::ShaderRead);
+
+            desc.set_texture_type(metal::MTLTextureType::D2);
+            desc.set_width(1);
+            desc.set_height(1);
+
+            let texture = device.new_texture(&desc);
+            texture.replace_region(
+                metal::MTLRegion::new_2d(0, 0, 1, 1),
+                0,
+                (&[255u8; 4]).as_ptr() as *const _,
+                4,
+            );
+            texture
+        };
+
         Renderer {
             device,
             queue,
@@ -124,9 +148,12 @@ impl Renderer {
             size: inner_size,
 
             glyphs: super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE),
-            texture,
+            font_atlas,
+            white_texture,
 
             grid,
+
+            cursor: Cursor { position: [0, 0] },
         }
     }
 
@@ -145,14 +172,21 @@ impl Renderer {
     }
 
     fn resize_grid(&mut self) {
-        let metrics = self.glyphs.font().metrics();
-        self.grid =
-            super::CharacterGrid::in_window(self.size, [metrics.advance, metrics.line_height]);
+        let cell_size = Self::cell_size(self.glyphs.font());
+        let new_grid = super::CharacterGrid::in_window(self.size, cell_size);
 
-        self.character_vertices = buffer::Buffer::new(
-            6 * self.grid.width as usize * self.grid.height as usize,
-            &self.device,
-        );
+        if new_grid.size() != self.grid.size() {
+            self.grid = new_grid;
+            self.character_vertices = buffer::Buffer::new(
+                6 * self.grid.width as usize * self.grid.height as usize,
+                &self.device,
+            );
+        }
+    }
+
+    fn cell_size(font: &crate::font::Font) -> [f32; 2] {
+        let metrics = font.metrics();
+        [metrics.advance, metrics.line_height]
     }
 
     pub fn grid(&mut self) -> &mut super::CharacterGrid {
@@ -163,9 +197,11 @@ impl Renderer {
         self.glyphs = super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE);
     }
 
-    pub fn render(&mut self) {
-        eprintln!("render");
+    pub fn set_cursor_position(&mut self, cursor: [u16; 2]) {
+        self.cursor.position = cursor;
+    }
 
+    pub fn render(&mut self) {
         self.update_character_vertices();
 
         let drawable = self.layer.next_drawable().unwrap();
@@ -173,14 +209,17 @@ impl Renderer {
         let command_buffer = self.queue.new_command_buffer();
         let encoder = Self::create_command_encoder(command_buffer, drawable.texture());
 
-        // Render characters
+        // Setup rendering pipeline
         encoder.set_render_pipeline_state(&self.pipeline);
-        encoder.set_fragment_texture(0, Some(&self.texture));
+        encoder.set_fragment_texture(0, Some(&self.font_atlas));
 
         self.render_characters(encoder);
+
         if false {
             self.render_font_atlas(encoder)
         }
+
+        self.render_cursor(encoder);
 
         encoder.end_encoding();
         command_buffer.present_drawable(&drawable);
@@ -242,6 +281,36 @@ impl Renderer {
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
+    fn render_cursor(&self, encoder: &metal::RenderCommandEncoderRef) {
+        let cursor_vertices = self.create_cursor_vertices();
+        encoder.set_fragment_texture(0, Some(&self.white_texture));
+        encoder.set_vertex_buffers(
+            0,
+            &[Some(&cursor_vertices), Some(&self.window_buffer)],
+            &[0; 2],
+        );
+        encoder.draw_primitives(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            cursor_vertices.len() as u64,
+        );
+    }
+
+    fn create_cursor_vertices(&self) -> buffer::Buffer<super::Vertex> {
+        let [width, height] = Self::cell_size(self.glyphs.font());
+
+        let x = self.cursor.position[0] as f32 * width;
+        let y = self.cursor.position[1] as f32 * height;
+
+        let vertices = super::Vertex::quad(
+            [x, x + width, y, y + height],
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0; 4],
+        );
+
+        buffer::Buffer::with_data(&vertices, &self.device)
+    }
+
     fn update_character_vertices(&mut self) {
         let mut quads = Vec::<[super::Vertex; 6]>::with_capacity(
             self.grid.width as usize * self.grid.height as usize,
@@ -278,7 +347,7 @@ impl Renderer {
                 glyph.size[1] as u64,
             );
 
-            self.texture.replace_region(
+            self.font_atlas.replace_region(
                 region,
                 0,
                 pixels.as_ptr() as *const _,
