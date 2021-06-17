@@ -1,7 +1,10 @@
 mod font;
+mod grid;
 mod render;
 mod tty;
 mod window;
+
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct Foo;
@@ -23,40 +26,62 @@ fn main() {
         },
     );
 
-    let mut renderer = render::Renderer::new(&window, load_font(window.scale_factor()));
-    let mut needs_redraw = true;
-    let mut cursor = [0, 0];
+    let font = Arc::new(load_font(window.scale_factor()));
+    let mut renderer = render::Renderer::new(&window, font.clone());
+
+    let grid_size = grid::size_in_window(window.inner_size(), font::cell_size(&font));
+    let mut grid = grid::CharacterGrid::new(grid_size[0], grid_size[1]);
+    let mut cursor = grid::Position::new(0, 0);
 
     let waker = event_loop.create_waker();
     let terminal = tty::Terminal::connect(pty, waker);
-    terminal.set_grid_size(renderer.grid().size());
+    terminal.set_grid_size(grid.size());
 
     event_loop.run(move |event| match event {
         window::Event::Active => {}
         window::Event::Inactive => {}
         window::Event::Resize(size) => {
-            let old_grid_size = renderer.grid().size();
+            eprintln!("resize: {}x{}", size.width, size.height);
+
             renderer.resize(size);
-            let new_grid_size = renderer.grid().size();
+
+            let old_grid_size = grid.size();
+            let new_grid_size = grid::size_in_window(size, font::cell_size(&font));
 
             if old_grid_size != new_grid_size {
                 terminal.set_grid_size(new_grid_size);
-                cursor = [0, 0];
+                grid = grid::CharacterGrid::new(new_grid_size[0], new_grid_size[1]);
+                cursor = grid::Position::new(0, 0);
             }
-
-            needs_redraw = true;
         }
-        window::Event::Char(ch) => terminal.send(ch),
         window::Event::ScaleFactorChanged => {
-            let font = load_font(window.scale_factor());
+            let font = Arc::new(load_font(window.scale_factor()));
             renderer.set_font(font);
             renderer.resize(window.inner_size());
-            needs_redraw = true;
         }
-        window::Event::KeyPress(key) => match key {
-            window::Key::Enter => terminal.send('\n'),
-            window::Key::Backspace => terminal.send('\x08'),
-            window::Key::Tab => terminal.send('\t'),
+        window::Event::KeyPress(key, modifiers) => match key {
+            window::Key::Char(ch) => {
+                if modifiers.is_empty() || modifiers == window::Modifiers::SHIFT {
+                    terminal.send_char(ch);
+                } else if modifiers.contains(window::Modifiers::CONTROL) && ch.is_ascii_alphabetic()
+                {
+                    let byte = (ch as u8).to_ascii_lowercase();
+                    terminal.send_char((byte - b'a' + 1) as char);
+                } else {
+                    eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
+                }
+            }
+
+            window::Key::Escape => terminal.send_char('\x1b'),
+
+            window::Key::Enter => terminal.send_char('\n'),
+            window::Key::Backspace => terminal.send_char('\x08'),
+            window::Key::Tab => terminal.send_char('\t'),
+
+            window::Key::ArrowUp => write!(terminal, "\x1b[A"),
+            window::Key::ArrowDown => write!(terminal, "\x1b[B"),
+            window::Key::ArrowRight => write!(terminal, "\x1b[C"),
+            window::Key::ArrowLeft => write!(terminal, "\x1b[D"),
         },
         window::Event::EventsCleared => {
             loop {
@@ -71,63 +96,130 @@ fn main() {
 
                 for code in message {
                     match code {
+                        tty::TerminalCode::Unknown(sequence) => {
+                            // eprintln!("unknown control sequence: {:?}", sequence)
+                        }
+
+                        tty::TerminalCode::Ignored(_sequence) => {
+                            // eprintln!("ignored control sequence: {:?}", sequence)
+                        }
+
                         tty::TerminalCode::Char(ch) => {
-                            let grid = renderer.grid();
                             grid[cursor].character = ch;
-                            if increment_wrapping(&mut cursor[0], grid.width()) {
-                                increment_wrapping(&mut cursor[1], grid.height());
+                            if increment_wrapping(&mut cursor.col, grid.cols()) {
+                                if cursor.row == grid.max_row() {
+                                    grid.scroll_up(1);
+                                } else {
+                                    cursor.row += 1;
+                                }
+                            }
+                        }
+                        tty::TerminalCode::Text(text) => {
+                            for ch in text.chars() {
+                                grid[cursor].character = ch;
+                                if increment_wrapping(&mut cursor.col, grid.cols()) {
+                                    if cursor.row == grid.max_row() {
+                                        grid.scroll_up(1);
+                                    } else {
+                                        cursor.row += 1;
+                                    }
+                                }
                             }
                         }
                         tty::TerminalCode::CarriageReturn => {
-                            cursor[0] = 0;
+                            cursor.col = 0;
                         }
                         tty::TerminalCode::LineFeed => {
-                            let grid = renderer.grid();
-                            if cursor[1] < grid.height() - 1 {
-                                cursor[1] += 1;
+                            cursor.col = 0;
+                            if cursor.row < grid.rows() - 1 {
+                                cursor.row += 1;
                             } else {
                                 grid.scroll_up(1);
                             }
                         }
                         tty::TerminalCode::Backspace => {
-                            if cursor[0] > 0 {
-                                cursor[0] -= 1;
+                            if cursor.col > 0 {
+                                cursor.col -= 1;
                             } else {
-                                cursor[0] = renderer.grid().width() - 1;
+                                cursor.col = grid.cols() - 1;
                             }
-                        }
-                        tty::TerminalCode::ClearLineToEnd => renderer
-                            .grid()
-                            .clear_region(cursor[0].., cursor[1]..=cursor[1]),
-                        tty::TerminalCode::ClearLineToStart => renderer
-                            .grid()
-                            .clear_region(..=cursor[0], cursor[1]..=cursor[1]),
-                        tty::TerminalCode::ClearLine => {
-                            renderer.grid().clear_region(.., cursor[1]..=cursor[1])
                         }
                         tty::TerminalCode::Bell => {
                             eprintln!("Bell!!!")
                         }
                         tty::TerminalCode::Tab => {
-                            let width = renderer.grid().width();
+                            let width = grid.cols();
                             loop {
-                                increment_wrapping(&mut cursor[0], width);
-                                if cursor[0] % 8 == 0 {
+                                increment_wrapping(&mut cursor.col, width);
+                                if cursor.col % 8 == 0 {
                                     break;
                                 }
                             }
                         }
+                        tty::TerminalCode::MoveCursor { direction, steps } => match direction {
+                            tty::Direction::Up => cursor.row = cursor.row.saturating_sub(steps),
+                            tty::Direction::Down => {
+                                cursor.row = cursor.row.saturating_add(steps).min(grid.max_row())
+                            }
+                            tty::Direction::Left => cursor.col = cursor.col.saturating_sub(steps),
+                            tty::Direction::Right => {
+                                cursor.col = cursor.col.saturating_add(steps).min(grid.max_col())
+                            }
+                        },
+                        tty::TerminalCode::SetCursorPos(new_pos) => {
+                            cursor.col = new_pos[0].min(grid.max_row());
+                            cursor.row = new_pos[1].min(grid.max_col());
+                        }
+
+                        tty::TerminalCode::Erase { count } => {
+                            // TODO: figure out what this actually is supposed to do
+                            dbg!(code);
+                        }
+
+                        tty::TerminalCode::ClearScreenToEnd => {
+                            // clear current line
+                            grid.clear_region(cursor.row..=cursor.row, cursor.col..);
+                            // clear everything after current line
+                            grid.clear_region(cursor.row + 1.., ..);
+                        }
+                        tty::TerminalCode::ClearScreenToStart => {
+                            // clear current line
+                            grid.clear_region(cursor.row..=cursor.row, ..cursor.col);
+                            // clear everything before current line
+                            grid.clear_region(..cursor.row, ..);
+                        }
+                        tty::TerminalCode::ClearScreen => {
+                            grid.clear_region(.., ..);
+                        }
+                        tty::TerminalCode::ClearScreenAndScrollback => {
+                            grid.clear_region(.., ..);
+                            todo!("clear scrollback")
+                        }
+
+                        tty::TerminalCode::ClearLineToEnd => {
+                            grid.clear_region(cursor.row..=cursor.row, cursor.col..)
+                        }
+                        tty::TerminalCode::ClearLineToStart => {
+                            grid.clear_region(cursor.row..=cursor.row, ..=cursor.col)
+                        }
+                        tty::TerminalCode::ClearLine => {
+                            grid.clear_region(cursor.row..=cursor.row, ..)
+                        }
+
+                        tty::TerminalCode::SetWindowTitle(title) => window.set_title(&title),
+
+                        tty::TerminalCode::SetBracketedPaste(_enabled) => {
+                            eprintln!("TODO: bracketed paste");
+                        }
+
+                        tty::TerminalCode::SetApplicationCursor(_enabled) => {
+                            eprintln!("TODO: application cursor sequences");
+                        }
                     }
                 }
-
-                needs_redraw = true;
             }
 
-            if needs_redraw {
-                needs_redraw = false;
-                renderer.set_cursor_position(cursor);
-                renderer.render();
-            }
+            renderer.render(&grid, render::CursorState { position: cursor });
         }
     });
 }

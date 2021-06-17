@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 pub struct GlyphCache {
-    font: crate::font::Font,
+    font: std::sync::Arc<crate::font::Font>,
     atlas: super::texture_atlas::TextureAtlas,
     glyphs: HashMap<char, Glyph>,
 }
@@ -20,7 +20,7 @@ pub enum RasterizationError {
 }
 
 impl GlyphCache {
-    pub fn new(font: crate::font::Font, atlas_size: usize) -> GlyphCache {
+    pub fn new(font: std::sync::Arc<crate::font::Font>, atlas_size: usize) -> GlyphCache {
         GlyphCache {
             font,
             atlas: super::texture_atlas::TextureAtlas::new(atlas_size),

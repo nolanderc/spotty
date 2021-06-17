@@ -15,14 +15,10 @@ pub struct Renderer {
     glyphs: super::glyph_cache::GlyphCache,
     font_atlas: metal::Texture,
     white_texture: metal::Texture,
-
-    grid: super::CharacterGrid,
-
-    cursor: Cursor,
 }
 
 struct Cursor {
-    position: [u16; 2],
+    position: crate::grid::Position,
 }
 
 #[repr(C)]
@@ -35,7 +31,10 @@ const SURFACE_FORMAT: metal::MTLPixelFormat = metal::MTLPixelFormat::BGRA8Unorm;
 const TEXTURE_FORMAT: metal::MTLPixelFormat = metal::MTLPixelFormat::RGBA8Unorm;
 
 impl Renderer {
-    pub fn new(window: &crate::window::cocoa::Window, font: crate::font::Font) -> Renderer {
+    pub fn new(
+        window: &crate::window::cocoa::Window,
+        font: std::sync::Arc<crate::font::Font>,
+    ) -> Renderer {
         let device = metal::Device::system_default().unwrap();
         let queue = device.new_command_queue();
 
@@ -93,10 +92,7 @@ impl Renderer {
             device.new_render_pipeline_state(&desc).unwrap()
         };
 
-        let grid = super::CharacterGrid::in_window(inner_size, Self::cell_size(&font));
-
-        let character_vertices =
-            buffer::Buffer::new(6 * grid.width as usize * grid.height as usize, &device);
+        let character_vertices = buffer::Buffer::new(0, &device);
 
         let window_buffer = {
             let uniforms = WindowUniforms {
@@ -150,15 +146,10 @@ impl Renderer {
             glyphs: super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE),
             font_atlas,
             white_texture,
-
-            grid,
-
-            cursor: Cursor { position: [0, 0] },
         }
     }
 
     pub fn resize(&mut self, size: crate::window::PhysicalSize) {
-        eprintln!("resize: {}x{}", size.width, size.height);
         self.size = size;
 
         self.layer
@@ -167,42 +158,14 @@ impl Renderer {
         self.window_buffer.modify(0..1, |uniforms| {
             uniforms[0].size = [size.width as f32, size.height as f32]
         });
-
-        self.resize_grid();
     }
 
-    fn resize_grid(&mut self) {
-        let cell_size = Self::cell_size(self.glyphs.font());
-        let new_grid = super::CharacterGrid::in_window(self.size, cell_size);
-
-        if new_grid.size() != self.grid.size() {
-            self.grid = new_grid;
-            self.character_vertices = buffer::Buffer::new(
-                6 * self.grid.width as usize * self.grid.height as usize,
-                &self.device,
-            );
-        }
-    }
-
-    fn cell_size(font: &crate::font::Font) -> [f32; 2] {
-        let metrics = font.metrics();
-        [metrics.advance, metrics.line_height]
-    }
-
-    pub fn grid(&mut self) -> &mut super::CharacterGrid {
-        &mut self.grid
-    }
-
-    pub fn set_font(&mut self, font: crate::font::Font) {
+    pub fn set_font(&mut self, font: std::sync::Arc<crate::font::Font>) {
         self.glyphs = super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE);
     }
 
-    pub fn set_cursor_position(&mut self, cursor: [u16; 2]) {
-        self.cursor.position = cursor;
-    }
-
-    pub fn render(&mut self) {
-        self.update_character_vertices();
+    pub fn render(&mut self, grid: &crate::grid::CharacterGrid, cursor: super::CursorState) {
+        self.update_character_vertices(grid);
 
         let drawable = self.layer.next_drawable().unwrap();
 
@@ -219,7 +182,7 @@ impl Renderer {
             self.render_font_atlas(encoder)
         }
 
-        self.render_cursor(encoder);
+        self.render_cursor(encoder, cursor);
 
         encoder.end_encoding();
         command_buffer.present_drawable(&drawable);
@@ -281,8 +244,8 @@ impl Renderer {
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
-    fn render_cursor(&self, encoder: &metal::RenderCommandEncoderRef) {
-        let cursor_vertices = self.create_cursor_vertices();
+    fn render_cursor(&self, encoder: &metal::RenderCommandEncoderRef, cursor: super::CursorState) {
+        let cursor_vertices = self.create_cursor_vertices(cursor);
         encoder.set_fragment_texture(0, Some(&self.white_texture));
         encoder.set_vertex_buffers(
             0,
@@ -296,11 +259,11 @@ impl Renderer {
         );
     }
 
-    fn create_cursor_vertices(&self) -> buffer::Buffer<super::Vertex> {
-        let [width, height] = Self::cell_size(self.glyphs.font());
+    fn create_cursor_vertices(&self, cursor: super::CursorState) -> buffer::Buffer<super::Vertex> {
+        let [width, height] = crate::font::cell_size(self.glyphs.font());
 
-        let x = self.cursor.position[0] as f32 * width;
-        let y = self.cursor.position[1] as f32 * height;
+        let x = cursor.position.col as f32 * width;
+        let y = cursor.position.row as f32 * height;
 
         let vertices = super::Vertex::quad(
             [x, x + width, y, y + height],
@@ -311,20 +274,21 @@ impl Renderer {
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
-    fn update_character_vertices(&mut self) {
-        let mut quads = Vec::<[super::Vertex; 6]>::with_capacity(
-            self.grid.width as usize * self.grid.height as usize,
-        );
+    fn update_character_vertices(&mut self, grid: &crate::grid::CharacterGrid) {
+        let cols = grid.cols();
+        let rows = grid.rows();
+
+        let mut quads = Vec::<[super::Vertex; 6]>::with_capacity(cols as usize * rows as usize);
 
         let font_metrics = *self.glyphs.font().metrics();
 
-        for y in 0..self.grid.height {
-            for x in 0..self.grid.width {
-                let cell = self.grid[[x, y]];
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = grid[crate::grid::Position::new(row, col)];
                 let glyph = self.get_glyph(cell.character);
 
-                let baseline_x = x as f32 * font_metrics.advance;
-                let baseline_y = (1 + y) as f32 * font_metrics.line_height - font_metrics.descent;
+                let baseline_x = col as f32 * font_metrics.advance;
+                let baseline_y = (1 + row) as f32 * font_metrics.line_height - font_metrics.descent;
 
                 let quad = super::Vertex::glyph_quad(glyph, [baseline_x, baseline_y], [1.0; 4]);
 
@@ -333,7 +297,7 @@ impl Renderer {
         }
 
         self.character_vertices
-            .write(bytemuck::cast_slice(&quads), 0);
+            .update(bytemuck::cast_slice(&quads), &self.device);
     }
 
     fn get_glyph(&mut self, ch: char) -> super::glyph_cache::Glyph {

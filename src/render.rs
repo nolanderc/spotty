@@ -10,9 +10,13 @@ pub use platform::Renderer;
 
 const FONT_ATLAS_SIZE: usize = 2048;
 
+pub struct CursorState {
+    pub position: crate::grid::Position,
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Vertex {
+struct Vertex {
     position: [f32; 2],
     tex_coord: [f32; 2],
     color: [f32; 4],
@@ -71,138 +75,3 @@ impl Vertex {
     }
 }
 
-pub struct CharacterGrid {
-    width: u16,
-    height: u16,
-    cells: Vec<GridCell>,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct GridCell {
-    pub character: char,
-}
-
-impl Default for GridCell {
-    fn default() -> Self {
-        GridCell { character: ' ' }
-    }
-}
-
-impl CharacterGrid {
-    pub fn new(width: u16, height: u16) -> CharacterGrid {
-        CharacterGrid {
-            width,
-            height,
-            cells: vec![GridCell::default(); width as usize * height as usize],
-        }
-    }
-
-    pub fn in_window(
-        window_size: crate::window::PhysicalSize,
-        cell_size: [f32; 2],
-    ) -> CharacterGrid {
-        let cells_x = window_size.width as f32 / cell_size[0];
-        let cells_y = window_size.height as f32 / cell_size[1];
-
-        let width = f32::clamp(cells_x.floor(), 1.0, f32::from(u16::MAX));
-        let height = f32::clamp(cells_y.floor(), 1.0, f32::from(u16::MAX));
-
-        // SAFETY: width and height are in the representable range of a u16
-        let width = unsafe { width.to_int_unchecked::<u16>() };
-        let height = unsafe { height.to_int_unchecked::<u16>() };
-
-        CharacterGrid::new(width, height)
-    }
-
-    pub fn size(&self) -> [u16; 2] {
-        [self.width, self.height]
-    }
-
-    pub fn width(&self) -> u16 {
-        self.width
-    }
-
-    pub fn height(&self) -> u16 {
-        self.height
-    }
-
-    pub fn scroll_up(&mut self, rows: u16) {
-        let width = self.width as usize;
-        let new_start = width * rows as usize;
-        let new_end = self.cells.len() - new_start;
-
-        self.cells.copy_within(new_start.., 0);
-        self.cells[new_end..].fill(GridCell::empty());
-    }
-
-    pub fn clear_region(
-        &mut self,
-        x_range: impl std::ops::RangeBounds<u16>,
-        y_range: impl std::ops::RangeBounds<u16>,
-    ) {
-        fn into_exclusive_range(
-            range: impl std::ops::RangeBounds<u16>,
-            max: u16,
-        ) -> std::ops::Range<u16> {
-            let start = match range.start_bound() {
-                std::ops::Bound::Included(index) => *index,
-                std::ops::Bound::Excluded(index) => *index + 1,
-                std::ops::Bound::Unbounded => 0,
-            };
-
-            let end = match range.start_bound() {
-                std::ops::Bound::Included(index) => *index + 1,
-                std::ops::Bound::Excluded(index) => *index,
-                std::ops::Bound::Unbounded => max,
-            };
-
-            start..end
-        }
-
-        let x_range = into_exclusive_range(x_range, self.width);
-        let y_range = into_exclusive_range(y_range, self.height);
-
-        for y in y_range {
-            let row_index = y as usize * self.width as usize;
-            let start = x_range.start as usize + row_index;
-            let end = x_range.end as usize + row_index;
-            self.cells[start..end].fill(GridCell::empty());
-        }
-    }
-}
-
-impl std::ops::Index<[u16; 2]> for CharacterGrid {
-    type Output = GridCell;
-
-    fn index(&self, [x, y]: [u16; 2]) -> &Self::Output {
-        assert!(
-            x < self.width && y < self.height,
-            "out of grid bounds (index = [{}, {}], size = [{}, {}])",
-            x,
-            y,
-            self.width,
-            self.height
-        );
-        &self.cells[x as usize + y as usize * self.width as usize]
-    }
-}
-
-impl std::ops::IndexMut<[u16; 2]> for CharacterGrid {
-    fn index_mut(&mut self, [x, y]: [u16; 2]) -> &mut Self::Output {
-        assert!(
-            x < self.width && y < self.height,
-            "out of grid bounds (index = [{}, {}], size = [{}, {}])",
-            x,
-            y,
-            self.width,
-            self.height
-        );
-        &mut self.cells[x as usize + y as usize * self.width as usize]
-    }
-}
-
-impl GridCell {
-    pub fn empty() -> Self {
-        GridCell { character: ' ' }
-    }
-}

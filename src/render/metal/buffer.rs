@@ -5,7 +5,7 @@ pub struct Buffer<T: bytemuck::Pod> {
 }
 
 impl<T: bytemuck::Pod> Buffer<T> {
-    pub fn new(len: usize, device: &metal::Device) -> Buffer<T> {
+    pub fn new(len: usize, device: &metal::DeviceRef) -> Buffer<T> {
         let bytes = len * std::mem::size_of::<T>();
         let raw = device.new_buffer(
             bytes as u64,
@@ -20,7 +20,7 @@ impl<T: bytemuck::Pod> Buffer<T> {
         }
     }
 
-    pub fn with_data(data: &[T], device: &metal::Device) -> Buffer<T> {
+    pub fn with_data(data: &[T], device: &metal::DeviceRef) -> Buffer<T> {
         let bytes = bytemuck::cast_slice::<T, u8>(data);
         let raw = device.new_buffer_with_data(
             bytes.as_ptr() as *const _,
@@ -44,6 +44,14 @@ impl<T: bytemuck::Pod> Buffer<T> {
         self.modify(offset..offset + data.len(), |contents| {
             contents.copy_from_slice(data);
         });
+    }
+
+    pub fn update(&mut self, data: &[T], device: &metal::DeviceRef) {
+        if self.len == data.len() {
+            self.write(data, 0);
+        } else {
+            *self = Self::with_data(data, device)
+        }
     }
 
     pub fn modify(&mut self, range: impl std::ops::RangeBounds<usize>, f: impl FnOnce(&mut [T])) {

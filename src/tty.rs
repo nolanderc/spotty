@@ -44,8 +44,8 @@ impl Psuedoterminal {
                 }
 
                 // Launch a shell
-                let program = c_str(b"/bin/sh\0");
-                let args: &[&std::ffi::CStr] = &[];
+                let program = c_str(b"/bin/zsh\0");
+                let args: &[&std::ffi::CStr] = &[c_str(b"-i\0")];
 
                 let result = nix::unistd::execv(program, args)?;
                 match result {}
@@ -65,12 +65,20 @@ pub struct Terminal {
     output: flume::Receiver<TerminalOutput>,
 }
 
-pub type TerminalInput = char;
-pub type TerminalOutput = Vec<TerminalCode>;
+enum TerminalInput {
+    Char(char),
+    Bytes(Box<[u8]>),
+}
+
+type TerminalOutput = Vec<TerminalCode>;
 
 #[derive(Debug, Clone)]
 pub enum TerminalCode {
+    Unknown(Box<str>),
+    Ignored(Box<str>),
+
     Char(char),
+    Text(Box<str>),
 
     /// Makes an audible bell
     Bell,
@@ -85,12 +93,50 @@ pub enum TerminalCode {
     /// `\n`
     LineFeed,
 
+    MoveCursor {
+        direction: Direction,
+        steps: u16,
+    },
+
+    /// Erase some number of characters
+    Erase {
+        count: u16
+    },
+
+    SetCursorPos([u16; 2]),
+
+    /// Clear from cursor to the end of the screen
+    ClearScreenToEnd,
+    /// Clear from cursor to the start of the screen
+    ClearScreenToStart,
+    /// Clear entire screen
+    ClearScreen,
+    /// Clear entire screen and scrollback buffer
+    ClearScreenAndScrollback,
+
     /// Clear from cursor to the end of the line
     ClearLineToEnd,
     /// Clear from start of the line to the cursor
     ClearLineToStart,
     /// Clear entire line
     ClearLine,
+
+    /// If enabled: surround text pasted into terminal with `ESC [200~` and `ESC [201~`
+    SetBracketedPaste(bool),
+
+    /// If enabled: arrow keys should send application codes instead of ANSI codes
+    SetApplicationCursor(bool),
+
+    /// Sets the title of the window
+    SetWindowTitle(Box<str>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -133,8 +179,8 @@ impl Terminal {
         unsafe {
             nix::ioctl_write_ptr_bad!(set_window_size, nix::libc::TIOCSWINSZ, nix::libc::winsize);
             let new_size = nix::libc::winsize {
-                ws_row: size[1],
-                ws_col: size[0],
+                ws_row: size[0],
+                ws_col: size[1],
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
@@ -150,8 +196,13 @@ impl Terminal {
         })
     }
 
-    pub fn send(&self, ch: char) {
-        let _ = self.input.send(ch);
+    pub fn send_char(&self, ch: char) {
+        let _ = self.input.send(TerminalInput::Char(ch));
+    }
+
+    pub fn write_fmt(&self, args: std::fmt::Arguments) {
+        let bytes = args.to_string().into_bytes().into_boxed_slice();
+        let _ = self.input.send(TerminalInput::Bytes(bytes));
     }
 
     fn handle_terminal_input(
@@ -168,10 +219,14 @@ impl Terminal {
 
         loop {
             match next_item {
-                Ok(message) => {
+                Ok(TerminalInput::Char(ch)) => {
                     let mut buffer = [0u8; 4];
-                    let encoded = message.encode_utf8(&mut buffer).as_bytes();
+                    let encoded = ch.encode_utf8(&mut buffer).as_bytes();
                     writer.write_all(encoded)?;
+                    next_item = receiver.try_recv();
+                }
+                Ok(TerminalInput::Bytes(bytes)) => {
+                    writer.write_all(&bytes)?;
                     next_item = receiver.try_recv();
                 }
                 Err(flume::TryRecvError::Empty) => {
@@ -247,6 +302,7 @@ impl Terminal {
 
             sender.send(codes.clone()).unwrap();
             codes.clear();
+
             waker.wake();
         }
 
@@ -254,117 +310,276 @@ impl Terminal {
     }
 }
 
+type ParseResult<T> = Result<T, ParseError>;
+
+enum ParseError {
+    Incomplete,
+    Invalid,
+    Ignored,
+}
+
 impl TerminalCode {
     fn parse(text: &str, mut emit: impl FnMut(TerminalCode)) -> &str {
         let mut chars = text.chars();
 
-        let mut unprocessed;
+        let mut unprocessed = chars.as_str();
 
-        'outer: loop {
-            unprocessed = chars.as_str();
-            let ch = match chars.next() {
-                None => break 'outer,
-                Some(ch) => ch,
-            };
+        loop {
+            match chars.next() {
+                None => {
+                    if unprocessed.len() > 0 {
+                        emit(TerminalCode::Text(unprocessed.to_owned().into_boxed_str()));
+                    }
+                    return "";
+                }
+                Some(ch) if ch.is_ascii_control() => {
+                    let remaining_bytes = 1 + chars.as_str().len();
+                    let text_len = unprocessed.len() - remaining_bytes;
+                    if text_len > 0 {
+                        let (text, rest) = unprocessed.split_at(text_len);
+                        emit(TerminalCode::Text(text.to_owned().into_boxed_str()));
+                        unprocessed = rest;
+                    }
 
-            match ch {
-                '\x07' => emit(TerminalCode::Bell),
-                '\x08' => emit(TerminalCode::Backspace),
-                '\x09' => emit(TerminalCode::Tab),
-                '\r' => emit(TerminalCode::CarriageReturn),
-                '\n' => emit(TerminalCode::LineFeed),
-                '\x1b' => match chars.next() {
-                    // Control Sequence
-                    Some('[') => {
-                        let bytes = chars.as_str().as_bytes();
-                        match Self::parse_control_sequence_arguments(bytes) {
-                            Err(rest) => {
-                                eprintln!(
-                                    "invalid control sequence arguments: {:?}",
-                                    &text[text.len() - bytes.len()..text.len() - rest.len()]
-                                );
+                    let parse_result = match ch {
+                        '\x07' => Ok(TerminalCode::Bell),
+                        '\x08' => Ok(TerminalCode::Backspace),
+                        '\x09' => Ok(TerminalCode::Tab),
+                        '\r' => Ok(TerminalCode::CarriageReturn),
+                        '\n' => Ok(TerminalCode::LineFeed),
+                        '\x1b' => match chars.next() {
+                            // Control Sequence
+                            Some('[') => Self::parse_ansi_control_sequence(&mut chars),
 
-                                chars = text[text.len() - rest.len()..].chars();
-                                emit(TerminalCode::Char(char::REPLACEMENT_CHARACTER))
-                            }
-                            Ok((arguments, private, rest)) => {
-                                chars = text[text.len() - rest.len()..].chars();
+                            // Operating System Command
+                            Some(']') => Self::parse_operating_system_command(&mut chars),
 
-                                match chars.next() {
-                                    None => break 'outer,
-                                    Some(ch) if !private => match ch {
-                                        'K' => match arguments[0] {
-                                            0 => emit(TerminalCode::ClearLineToEnd),
-                                            1 => emit(TerminalCode::ClearLineToStart),
-                                            2 | _ => emit(TerminalCode::ClearLine),
-                                        },
-                                        _ => {
-                                            let sequence_start = text.len() - unprocessed.len();
-                                            let sequence_end = text.len() - chars.as_str().len();
-                                            let sequence = &text[sequence_start..sequence_end];
-                                            eprintln!("unknown control sequence: {:?}", sequence);
+                            // sets the character set: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+                            Some('(') => match chars.next() {
+                                None => Err(ParseError::Incomplete),
+                                Some(_) => Err(ParseError::Ignored),
+                            },
 
-                                            emit(TerminalCode::Char(char::REPLACEMENT_CHARACTER));
-                                        }
-                                    },
-                                    Some(ch) => match ch {
-                                        _ => {
-                                            let sequence_start = text.len() - unprocessed.len();
-                                            let sequence_end = text.len() - chars.as_str().len();
-                                            let sequence = &text[sequence_start..sequence_end];
-                                            eprintln!("unknown control sequence: {:?}", sequence);
+                            // Enter alternate keypad mode
+                            Some('=') => Err(ParseError::Ignored),
 
-                                            emit(TerminalCode::Char(char::REPLACEMENT_CHARACTER));
-                                        }
-                                    },
-                                }
-                            }
+                            // Exit alternate keypad mode
+                            Some('>') => Err(ParseError::Ignored),
+
+                            Some(_) => Err(ParseError::Invalid),
+                            None => Err(ParseError::Incomplete),
+                        },
+                        _ => Err(ParseError::Invalid),
+                    };
+
+                    match parse_result {
+                        Ok(code) => emit(code),
+                        Err(ParseError::Incomplete) => return unprocessed,
+                        Err(ParseError::Invalid) => {
+                            let len = chars.as_str().len();
+                            let sequence = &unprocessed[..unprocessed.len() - len];
+                            emit(TerminalCode::Unknown(sequence.to_owned().into_boxed_str()));
+                        }
+                        Err(ParseError::Ignored) => {
+                            let len = chars.as_str().len();
+                            let sequence = &unprocessed[..unprocessed.len() - len];
+                            emit(TerminalCode::Ignored(sequence.to_owned().into_boxed_str()));
                         }
                     }
-                    _ => {
-                        eprintln!("unknown escape sequnce: {:?}", ch);
-                        emit(TerminalCode::Char(char::REPLACEMENT_CHARACTER));
-                    }
-                },
-                _ => emit(TerminalCode::Char(ch)),
+
+                    unprocessed = chars.as_str();
+                }
+                _ => continue,
             }
         }
-
-        unprocessed
     }
 
-    fn parse_control_sequence_arguments(input: &[u8]) -> Result<([u16; 5], bool, &[u8]), &[u8]> {
-        let mut arguments = [0; 5];
+    fn parse_ansi_control_sequence(chars: &mut std::str::Chars) -> ParseResult<TerminalCode> {
+        let (parameters, intermediate, terminator) = Self::parse_control_sequence_parts(chars)?;
+
+        match (parameters, intermediate, terminator) {
+            ("?2004", "", b'h') => Ok(TerminalCode::SetBracketedPaste(true)),
+            ("?2004", "", b'l') => Ok(TerminalCode::SetBracketedPaste(false)),
+
+            ("?1", "", b'h') => Ok(TerminalCode::SetApplicationCursor(true)),
+            ("?1", "", b'l') => Ok(TerminalCode::SetApplicationCursor(false)),
+
+            _ => {
+                // TODO: figure out how to handle intermediate bytes
+                if !intermediate.is_empty() {
+                    return Err(ParseError::Invalid);
+                }
+
+                let arguments = Self::parse_control_sequence_arguments(parameters.as_bytes())?;
+                Self::parse_standard_terminator(arguments, terminator)
+            }
+        }
+    }
+
+    fn parse_control_sequence_arguments(input: &[u8]) -> ParseResult<ControlSequenceArguments> {
+        let mut arguments = ControlSequenceArguments { values: [0; 5] };
         let mut argument_index = 0;
 
-        let mut private = false;
-
-        let mut bytes = input.iter();
-
-        while let Some(byte) = bytes.next() {
+        for &byte in input {
             match byte {
                 b'0'..=b'9' => {
-                    arguments[argument_index] *= 10;
-                    arguments[argument_index] += u16::from(byte - b'0');
+                    arguments.values[argument_index] *= 10;
+                    arguments.values[argument_index] += u16::from(byte - b'0');
                 }
                 b':' | b';' => {
                     argument_index += 1;
-                    if argument_index > arguments.len() {
-                        return Err(bytes.as_slice());
+                    if argument_index >= arguments.values.len() {
+                        return Err(ParseError::Invalid);
                     }
                 }
 
                 // reserved for private use
-                b'?' if !private => private = true,
-                b'<'..=b'?' => return Err(bytes.as_slice()),
-
-                _ => {
-                    let remaining_bytes = bytes.len() + 1;
-                    return Ok((arguments, private, &input[input.len() - remaining_bytes..]));
-                }
+                _ => return Err(ParseError::Invalid),
             }
         }
 
-        Err(&[])
+        Ok(arguments)
+    }
+
+    fn parse_control_sequence_parts<'a>(
+        chars: &mut std::str::Chars<'a>,
+    ) -> ParseResult<(&'a str, &'a str, u8)> {
+        let parameters = take_while_in_range(chars, 0x30..=0x3f)?;
+        let intermediate = take_while_in_range(chars, 0x20..=0x2f)?;
+        let terminator = chars.next().ok_or(ParseError::Incomplete)?;
+
+        if ('\x40'..='\x7f').contains(&terminator) {
+            Ok((parameters, intermediate, terminator as u8))
+        } else {
+            Err(ParseError::Invalid)
+        }
+    }
+
+    fn parse_standard_terminator(
+        arguments: ControlSequenceArguments,
+        ch: u8,
+    ) -> ParseResult<TerminalCode> {
+        fn move_cursor(direction: Direction, arguments: ControlSequenceArguments) -> TerminalCode {
+            TerminalCode::MoveCursor {
+                direction,
+                steps: arguments.get_default(0, 1),
+            }
+        }
+
+        match ch {
+            b'A' => Ok(move_cursor(Direction::Up, arguments)),
+            b'B' => Ok(move_cursor(Direction::Down, arguments)),
+            b'C' => Ok(move_cursor(Direction::Right, arguments)),
+            b'D' => Ok(move_cursor(Direction::Left, arguments)),
+
+            b'H' => Ok(TerminalCode::SetCursorPos([
+                arguments.get_default(0, 1) - 1,
+                arguments.get_default(0, 1) - 1,
+            ])),
+
+            b'J' => match arguments.get(0) {
+                0 => Ok(TerminalCode::ClearScreenToEnd),
+                1 => Ok(TerminalCode::ClearScreenToStart),
+                2 => Ok(TerminalCode::ClearScreen),
+                3 => Ok(TerminalCode::ClearScreenAndScrollback),
+                _ => Err(ParseError::Invalid),
+            },
+
+            b'K' => match arguments.values[0] {
+                0 => Ok(TerminalCode::ClearLineToEnd),
+                1 => Ok(TerminalCode::ClearLineToStart),
+                2 => Ok(TerminalCode::ClearLine),
+                _ => Err(ParseError::Invalid),
+            },
+
+            b'X' => Ok(TerminalCode::Erase { count: arguments.get_default(0, 1) }),
+
+            _ => Err(ParseError::Invalid),
+        }
+    }
+
+    fn parse_operating_system_command(chars: &mut std::str::Chars) -> ParseResult<TerminalCode> {
+        let numbers = take_while_in_range(chars, b'0'..=b'9')?;
+        let parameters = take_while_in_range(chars, 0x20..=0x7e)?;
+        let terminator = chars.next().ok_or(ParseError::Incomplete)?;
+
+        if !matches!(terminator, '\x07') {
+            return Err(ParseError::Invalid);
+        }
+
+        let parameters = parameters.strip_prefix(';').ok_or(ParseError::Invalid)?;
+
+        match numbers {
+            // Change "icon name" and window title. The former does not apply.
+            "0" => Ok(TerminalCode::SetWindowTitle(
+                parameters.to_owned().into_boxed_str(),
+            )),
+
+            // Change "icon name" (does not apply)
+            "1" => Err(ParseError::Ignored),
+
+            // Change window title.
+            "2" => Ok(TerminalCode::SetWindowTitle(
+                parameters.to_owned().into_boxed_str(),
+            )),
+
+            // Set X-property on top-level window (does not apply)
+            "3" => Err(ParseError::Ignored),
+
+            _ => Err(ParseError::Invalid),
+        }
+    }
+}
+
+fn take_while<'a>(
+    chars: &mut std::str::Chars<'a>,
+    mut predicate: impl FnMut(u8) -> bool,
+) -> ParseResult<&'a str> {
+    let text = chars.as_str();
+    let bytes = text.as_bytes();
+
+    if bytes.is_empty() {
+        return Err(ParseError::Incomplete);
+    }
+
+    let mut i = 0;
+    loop {
+        match bytes.get(i) {
+            Some(byte) if predicate(*byte) => i += 1,
+            None => return Err(ParseError::Incomplete),
+            _ => break,
+        }
+    }
+
+    if text.is_char_boundary(i) {
+        let (matching, rest) = text.split_at(i);
+        *chars = rest.chars();
+        Ok(matching)
+    } else {
+        Err(ParseError::Invalid)
+    }
+}
+
+fn take_while_in_range<'a, R>(chars: &mut std::str::Chars<'a>, range: R) -> ParseResult<&'a str>
+where
+    R: std::ops::RangeBounds<u8>,
+{
+    take_while(chars, |byte| range.contains(&byte))
+}
+
+struct ControlSequenceArguments {
+    values: [u16; 5],
+}
+
+impl ControlSequenceArguments {
+    pub fn get_default(&self, index: usize, default: u16) -> u16 {
+        match self.values[index] {
+            0 => default,
+            value => value,
+        }
+    }
+
+    pub fn get(&self, index: usize) -> u16 {
+        self.values[index]
     }
 }

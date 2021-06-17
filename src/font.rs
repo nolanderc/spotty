@@ -29,3 +29,10 @@ pub struct Bitmap {
     pub pixels: Vec<[u8; 4]>,
 }
 
+
+pub fn cell_size(font: &crate::font::Font) -> [f32; 2] {
+    let metrics = font.metrics();
+    [metrics.advance, metrics.line_height]
+}
+
+

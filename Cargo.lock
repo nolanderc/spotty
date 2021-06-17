@@ -362,6 +362,7 @@ dependencies = [
 name = "spotty"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "bytemuck",
  "cocoa",
  "core-foundation",

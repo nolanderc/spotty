@@ -70,7 +70,7 @@ impl Window {
                     NSWindowStyleMask::NSClosableWindowMask
                         | NSWindowStyleMask::NSTitledWindowMask
                         | NSWindowStyleMask::NSResizableWindowMask,
-                    NSBackingStoreType::NSBackingStoreBuffered,
+                    NSBackingStoreType::NSBackingStoreRetained,
                     i8::from(false),
                 )
                 .autorelease();
@@ -94,10 +94,6 @@ impl Window {
         }
     }
 
-    pub fn close(&self) {
-        unsafe { cocoa::appkit::NSWindow::close(self.raw) };
-    }
-
     unsafe fn create_class() -> &'static objc::runtime::Class {
         let mut window = objc::declare::ClassDecl::new("SpottyWindow", class!(NSWindow)).unwrap();
 
@@ -117,6 +113,21 @@ impl Window {
             (windowDidResize:) => window_did_resize as extern "C" fn(&Object, Sel, CocoaId),
             (windowDidChangeBackingProperties:) => backing_properties_changed as extern "C" fn(&Object, Sel, CocoaId)
         })
+    }
+
+    pub fn close(&self) {
+        unsafe { cocoa::appkit::NSWindow::close(self.raw) };
+    }
+
+    pub fn set_title(&self, title: &str) {
+        use cocoa::appkit::NSWindow;
+        use cocoa::base::nil;
+        use cocoa::foundation::NSString;
+
+        unsafe {
+            let new_title = NSString::alloc(nil).init_str(title);
+            NSWindow::setTitle_(self.raw, new_title);
+        }
     }
 
     pub fn content_view(&self) -> CocoaId {
@@ -282,16 +293,32 @@ impl From<super::PhysicalSize> for cocoa::foundation::NSSize {
 }
 
 extern "C" fn key_down(_this: &Object, _cmd: Sel, event: CocoaId) {
+    use super::{Event::KeyPress, Key};
     use cocoa::appkit::NSEvent;
     use cocoa::foundation::NSString;
 
     unsafe {
+        let modifiers = get_event_modifiers(event);
+
         match event.keyCode() {
-            0x24 => HANDLER.send(super::Event::KeyPress(super::Key::Enter)),
-            0x33 => HANDLER.send(super::Event::KeyPress(super::Key::Backspace)),
-            0x30 => HANDLER.send(super::Event::KeyPress(super::Key::Tab)),
+            0x1b => HANDLER.send(KeyPress(Key::Escape, modifiers)),
+
+            0x24 | 0x4c => HANDLER.send(KeyPress(Key::Enter, modifiers)),
+            0x33 => HANDLER.send(KeyPress(Key::Backspace, modifiers)),
+            0x30 => HANDLER.send(KeyPress(Key::Tab, modifiers)),
+
+            0x7b => HANDLER.send(KeyPress(Key::ArrowLeft, modifiers)),
+            0x7c => HANDLER.send(KeyPress(Key::ArrowRight, modifiers)),
+            0x7d => HANDLER.send(KeyPress(Key::ArrowDown, modifiers)),
+            0x7e => HANDLER.send(KeyPress(Key::ArrowUp, modifiers)),
+
             _ => {
-                let chars = event.characters();
+                let chars = if modifiers.contains(super::Modifiers::CONTROL) {
+                    event.charactersIgnoringModifiers()
+                } else {
+                    event.characters()
+                };
+
                 let bytes = chars.UTF8String() as *const u8;
                 let slice = std::slice::from_raw_parts(bytes, chars.len());
 
@@ -302,16 +329,37 @@ extern "C" fn key_down(_this: &Object, _cmd: Sel, event: CocoaId) {
                         }
 
                         if ch.is_control() || is_private_area(ch) {
-                            eprintln!("{:?} : 0x{:x}", ch, event.keyCode());
                             continue;
                         }
 
-                        HANDLER.send(super::Event::Char(ch));
+                        HANDLER.send(KeyPress(Key::Char(ch), modifiers));
                     }
                 }
             }
         }
     }
+}
+
+unsafe fn get_event_modifiers(event: CocoaId) -> super::Modifiers {
+    use cocoa::appkit::{NSEvent, NSEventModifierFlags};
+
+    let flags = NSEvent::modifierFlags(event);
+    let mut modifiers = super::Modifiers::empty();
+
+    if flags.contains(NSEventModifierFlags::NSControlKeyMask) {
+        modifiers.insert(super::Modifiers::CONTROL);
+    }
+    if flags.contains(NSEventModifierFlags::NSShiftKeyMask) {
+        modifiers.insert(super::Modifiers::SHIFT);
+    }
+    if flags.contains(NSEventModifierFlags::NSAlternateKeyMask) {
+        modifiers.insert(super::Modifiers::ALT);
+    }
+    if flags.contains(NSEventModifierFlags::NSCommandKeyMask) {
+        modifiers.insert(super::Modifiers::SUPER);
+    }
+
+    modifiers
 }
 
 extern "C" fn window_did_resize(_this: &Object, _cmd: Sel, notification: CocoaId) {

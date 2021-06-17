@@ -15,17 +15,31 @@ pub enum Event {
     Active,
     Inactive,
     Resize(PhysicalSize),
-    Char(char),
-    KeyPress(Key),
+    KeyPress(Key, Modifiers),
     ScaleFactorChanged,
     EventsCleared,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
+    Char(char),
+    Escape,
     Enter,
     Backspace,
     Tab,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
+}
+
+bitflags::bitflags! {
+    pub struct Modifiers: u8 {
+        const CONTROL = 1;
+        const SHIFT = 2;
+        const ALT = 4;
+        const SUPER = 8;
+    }
 }
 
 /// A size in physical pixels

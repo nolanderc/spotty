@@ -61,7 +61,7 @@ impl Font {
         &self.metrics
     }
 
-    pub fn rasterize(&mut self, ch: char) -> Option<super::RasterizedGlyph> {
+    pub fn rasterize(&self, ch: char) -> Option<super::RasterizedGlyph> {
         let (glyph, font) = find_glyph(ch, &self.cascade)?;
 
         let bounds = font.get_bounding_rects_for_glyphs(
