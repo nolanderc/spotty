@@ -19,17 +19,23 @@ impl Position {
 #[derive(Debug, Copy, Clone)]
 pub struct GridCell {
     pub character: char,
+    pub foreground: crate::color::Color,
+    pub background: crate::color::Color,
 }
 
 impl GridCell {
-    pub fn empty() -> Self {
-        GridCell { character: ' ' }
+    pub const fn empty() -> Self {
+        GridCell {
+            character: ' ',
+            foreground: crate::color::Color::BLACK,
+            background: crate::color::Color::BLACK,
+        }
     }
 }
 
 impl Default for GridCell {
     fn default() -> Self {
-        GridCell { character: ' ' }
+        GridCell::empty()
     }
 }
 

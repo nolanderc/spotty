@@ -17,10 +17,6 @@ pub struct Renderer {
     white_texture: metal::Texture,
 }
 
-struct Cursor {
-    position: crate::grid::Position,
-}
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct WindowUniforms {
@@ -197,7 +193,7 @@ impl Renderer {
 
         let attachment = desc.color_attachments().object_at(0).unwrap();
         attachment.set_texture(Some(target));
-        attachment.set_clear_color(metal::MTLClearColor::new(0.2, 0.2, 0.2, 1.0));
+        attachment.set_clear_color(metal::MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
         attachment.set_load_action(metal::MTLLoadAction::Clear);
         attachment.set_store_action(metal::MTLStoreAction::Store);
 
@@ -274,6 +270,7 @@ impl Renderer {
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
+    // TODO: do this in a compute shader instead
     fn update_character_vertices(&mut self, grid: &crate::grid::CharacterGrid) {
         let cols = grid.cols();
         let rows = grid.rows();
@@ -286,11 +283,12 @@ impl Renderer {
             for col in 0..cols {
                 let cell = grid[crate::grid::Position::new(row, col)];
                 let glyph = self.get_glyph(cell.character);
+                let foreground = cell.foreground.into_rgba_f32();
 
                 let baseline_x = col as f32 * font_metrics.advance;
                 let baseline_y = (1 + row) as f32 * font_metrics.line_height - font_metrics.descent;
 
-                let quad = super::Vertex::glyph_quad(glyph, [baseline_x, baseline_y], [1.0; 4]);
+                let quad = super::Vertex::glyph_quad(glyph, [baseline_x, baseline_y], foreground);
 
                 quads.push(quad);
             }

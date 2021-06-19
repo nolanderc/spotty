@@ -1,8 +1,11 @@
 mod font;
 mod grid;
+mod inline_str;
 mod render;
+mod screen;
 mod tty;
 mod window;
+mod color;
 
 use std::sync::Arc;
 
@@ -16,7 +19,7 @@ impl Drop for Foo {
 }
 
 fn main() {
-    let pty = tty::Psuedoterminal::create().unwrap();
+    let link = tty::PsuedoterminalLink::create().unwrap();
 
     let event_loop = window::EventLoop::new();
     let window = window::Window::new(
@@ -27,199 +30,32 @@ fn main() {
     );
 
     let font = Arc::new(load_font(window.scale_factor()));
-    let mut renderer = render::Renderer::new(&window, font.clone());
+    let renderer = render::Renderer::new(&window, font.clone());
 
     let grid_size = grid::size_in_window(window.inner_size(), font::cell_size(&font));
-    let mut grid = grid::CharacterGrid::new(grid_size[0], grid_size[1]);
-    let mut cursor = grid::Position::new(0, 0);
+    let screen = screen::Screen::new(grid_size);
 
     let waker = event_loop.create_waker();
-    let terminal = tty::Terminal::connect(pty, waker);
-    terminal.set_grid_size(grid.size());
+    let pty = tty::Psuedoterminal::connect(link, waker);
+    pty.set_grid_size(screen.grid.size());
+
+    let mut terminal = Terminal {
+        pty,
+        window,
+        renderer,
+        font,
+        screen,
+    };
 
     event_loop.run(move |event| match event {
         window::Event::Active => {}
         window::Event::Inactive => {}
-        window::Event::Resize(size) => {
-            eprintln!("resize: {}x{}", size.width, size.height);
-
-            renderer.resize(size);
-
-            let old_grid_size = grid.size();
-            let new_grid_size = grid::size_in_window(size, font::cell_size(&font));
-
-            if old_grid_size != new_grid_size {
-                terminal.set_grid_size(new_grid_size);
-                grid = grid::CharacterGrid::new(new_grid_size[0], new_grid_size[1]);
-                cursor = grid::Position::new(0, 0);
-            }
-        }
-        window::Event::ScaleFactorChanged => {
-            let font = Arc::new(load_font(window.scale_factor()));
-            renderer.set_font(font);
-            renderer.resize(window.inner_size());
-        }
-        window::Event::KeyPress(key, modifiers) => match key {
-            window::Key::Char(ch) => {
-                if modifiers.is_empty() || modifiers == window::Modifiers::SHIFT {
-                    terminal.send_char(ch);
-                } else if modifiers.contains(window::Modifiers::CONTROL) && ch.is_ascii_alphabetic()
-                {
-                    let byte = (ch as u8).to_ascii_lowercase();
-                    terminal.send_char((byte - b'a' + 1) as char);
-                } else {
-                    eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
-                }
-            }
-
-            window::Key::Escape => terminal.send_char('\x1b'),
-
-            window::Key::Enter => terminal.send_char('\n'),
-            window::Key::Backspace => terminal.send_char('\x08'),
-            window::Key::Tab => terminal.send_char('\t'),
-
-            window::Key::ArrowUp => write!(terminal, "\x1b[A"),
-            window::Key::ArrowDown => write!(terminal, "\x1b[B"),
-            window::Key::ArrowRight => write!(terminal, "\x1b[C"),
-            window::Key::ArrowLeft => write!(terminal, "\x1b[D"),
-        },
+        window::Event::Resize(size) => terminal.resize(size),
+        window::Event::ScaleFactorChanged => terminal.scale_factor_changed(),
+        window::Event::KeyPress(key, modifiers) => terminal.key_press(key, modifiers),
         window::Event::EventsCleared => {
-            loop {
-                let message = match terminal.try_read() {
-                    Ok(message) => message,
-                    Err(tty::TryReadError::Empty) => break,
-                    Err(tty::TryReadError::Closed) => {
-                        window.close();
-                        return;
-                    }
-                };
-
-                for code in message {
-                    match code {
-                        tty::TerminalCode::Unknown(sequence) => {
-                            // eprintln!("unknown control sequence: {:?}", sequence)
-                        }
-
-                        tty::TerminalCode::Ignored(_sequence) => {
-                            // eprintln!("ignored control sequence: {:?}", sequence)
-                        }
-
-                        tty::TerminalCode::Char(ch) => {
-                            grid[cursor].character = ch;
-                            if increment_wrapping(&mut cursor.col, grid.cols()) {
-                                if cursor.row == grid.max_row() {
-                                    grid.scroll_up(1);
-                                } else {
-                                    cursor.row += 1;
-                                }
-                            }
-                        }
-                        tty::TerminalCode::Text(text) => {
-                            for ch in text.chars() {
-                                grid[cursor].character = ch;
-                                if increment_wrapping(&mut cursor.col, grid.cols()) {
-                                    if cursor.row == grid.max_row() {
-                                        grid.scroll_up(1);
-                                    } else {
-                                        cursor.row += 1;
-                                    }
-                                }
-                            }
-                        }
-                        tty::TerminalCode::CarriageReturn => {
-                            cursor.col = 0;
-                        }
-                        tty::TerminalCode::LineFeed => {
-                            cursor.col = 0;
-                            if cursor.row < grid.rows() - 1 {
-                                cursor.row += 1;
-                            } else {
-                                grid.scroll_up(1);
-                            }
-                        }
-                        tty::TerminalCode::Backspace => {
-                            if cursor.col > 0 {
-                                cursor.col -= 1;
-                            } else {
-                                cursor.col = grid.cols() - 1;
-                            }
-                        }
-                        tty::TerminalCode::Bell => {
-                            eprintln!("Bell!!!")
-                        }
-                        tty::TerminalCode::Tab => {
-                            let width = grid.cols();
-                            loop {
-                                increment_wrapping(&mut cursor.col, width);
-                                if cursor.col % 8 == 0 {
-                                    break;
-                                }
-                            }
-                        }
-                        tty::TerminalCode::MoveCursor { direction, steps } => match direction {
-                            tty::Direction::Up => cursor.row = cursor.row.saturating_sub(steps),
-                            tty::Direction::Down => {
-                                cursor.row = cursor.row.saturating_add(steps).min(grid.max_row())
-                            }
-                            tty::Direction::Left => cursor.col = cursor.col.saturating_sub(steps),
-                            tty::Direction::Right => {
-                                cursor.col = cursor.col.saturating_add(steps).min(grid.max_col())
-                            }
-                        },
-                        tty::TerminalCode::SetCursorPos(new_pos) => {
-                            cursor.col = new_pos[0].min(grid.max_row());
-                            cursor.row = new_pos[1].min(grid.max_col());
-                        }
-
-                        tty::TerminalCode::Erase { count } => {
-                            // TODO: figure out what this actually is supposed to do
-                            dbg!(code);
-                        }
-
-                        tty::TerminalCode::ClearScreenToEnd => {
-                            // clear current line
-                            grid.clear_region(cursor.row..=cursor.row, cursor.col..);
-                            // clear everything after current line
-                            grid.clear_region(cursor.row + 1.., ..);
-                        }
-                        tty::TerminalCode::ClearScreenToStart => {
-                            // clear current line
-                            grid.clear_region(cursor.row..=cursor.row, ..cursor.col);
-                            // clear everything before current line
-                            grid.clear_region(..cursor.row, ..);
-                        }
-                        tty::TerminalCode::ClearScreen => {
-                            grid.clear_region(.., ..);
-                        }
-                        tty::TerminalCode::ClearScreenAndScrollback => {
-                            grid.clear_region(.., ..);
-                            todo!("clear scrollback")
-                        }
-
-                        tty::TerminalCode::ClearLineToEnd => {
-                            grid.clear_region(cursor.row..=cursor.row, cursor.col..)
-                        }
-                        tty::TerminalCode::ClearLineToStart => {
-                            grid.clear_region(cursor.row..=cursor.row, ..=cursor.col)
-                        }
-                        tty::TerminalCode::ClearLine => {
-                            grid.clear_region(cursor.row..=cursor.row, ..)
-                        }
-
-                        tty::TerminalCode::SetWindowTitle(title) => window.set_title(&title),
-
-                        tty::TerminalCode::SetBracketedPaste(_enabled) => {
-                            eprintln!("TODO: bracketed paste");
-                        }
-
-                        tty::TerminalCode::SetApplicationCursor(_enabled) => {
-                            eprintln!("TODO: application cursor sequences");
-                        }
-                    }
-                }
-            }
-
-            renderer.render(&grid, render::CursorState { position: cursor });
+            terminal.poll_input();
+            terminal.render();
         }
     });
 }
@@ -229,12 +65,83 @@ fn load_font(scale_factor: f64) -> font::Font {
     font::Font::with_name("Iosevka SS14", font_size * scale_factor).expect("failed to load font")
 }
 
-fn increment_wrapping(v: &mut u16, max: u16) -> bool {
-    *v += 1;
-    if *v < max {
-        false
-    } else {
-        *v = 0;
-        true
+pub struct Terminal {
+    pty: tty::Psuedoterminal,
+    window: window::Window,
+    renderer: render::Renderer,
+
+    font: Arc<font::Font>,
+
+    screen: screen::Screen,
+}
+
+impl Terminal {
+    pub fn resize(&mut self, size: window::PhysicalSize) {
+        eprintln!("resize: {}x{}", size.width, size.height);
+
+        self.renderer.resize(size);
+
+        let old_grid_size = self.screen.grid.size();
+        let new_grid_size = grid::size_in_window(size, font::cell_size(&self.font));
+
+        if old_grid_size != new_grid_size {
+            self.pty.set_grid_size(new_grid_size);
+            self.screen.grid = grid::CharacterGrid::new(new_grid_size[0], new_grid_size[1]);
+            self.screen.cursor = grid::Position::new(0, 0);
+        }
+    }
+
+    pub fn scale_factor_changed(&mut self) {
+        self.font = Arc::new(load_font(self.window.scale_factor()));
+        self.renderer.set_font(self.font.clone());
+    }
+
+    pub fn key_press(&mut self, key: window::Key, modifiers: window::Modifiers) {
+        match key {
+            window::Key::Char(ch) => {
+                use window::Modifiers;
+                if modifiers.is_empty() || modifiers == Modifiers::SHIFT {
+                    self.pty.send_char(ch);
+                } else if modifiers.contains(Modifiers::CONTROL) && ch.is_ascii_alphabetic() {
+                    let byte = (ch as u8).to_ascii_lowercase();
+                    self.pty.send_char((byte - b'a' + 1) as char);
+                } else {
+                    eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
+                }
+            }
+
+            window::Key::Escape => self.pty.send_char('\x1b'),
+
+            window::Key::Enter => self.pty.send_char('\n'),
+            window::Key::Backspace => self.pty.send_char('\x08'),
+            window::Key::Tab => self.pty.send_char('\t'),
+
+            window::Key::ArrowUp => write!(self.pty, "\x1b[A"),
+            window::Key::ArrowDown => write!(self.pty, "\x1b[B"),
+            window::Key::ArrowRight => write!(self.pty, "\x1b[C"),
+            window::Key::ArrowLeft => write!(self.pty, "\x1b[D"),
+        }
+    }
+
+    pub fn poll_input(&mut self) {
+        loop {
+            match self.pty.try_read() {
+                Ok(input) => self.screen.process_input(&input),
+                Err(tty::TryReadError::Empty) => break,
+                Err(tty::TryReadError::Closed) => {
+                    self.window.close();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn render(&mut self) {
+        self.renderer.render(
+            &self.screen.grid,
+            render::CursorState {
+                position: self.screen.cursor,
+            },
+        );
     }
 }
