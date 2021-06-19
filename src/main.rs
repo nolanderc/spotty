@@ -94,6 +94,7 @@ impl Terminal {
     pub fn scale_factor_changed(&mut self) {
         self.font = Arc::new(load_font(self.window.scale_factor()));
         self.renderer.set_font(self.font.clone());
+        self.resize(self.window.inner_size());
     }
 
     pub fn key_press(&mut self, key: window::Key, modifiers: window::Modifiers) {

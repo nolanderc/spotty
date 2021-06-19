@@ -131,6 +131,16 @@ impl crate::tty::control_code::Terminal for Screen {
         self.advance_row();
     }
 
+    fn reverse_line_feed(&mut self) {
+        self.cursor.col = 0;
+        if self.cursor.row > 0 {
+            self.cursor.row += 1;
+        } else {
+            self.grid.scroll_down(1);
+        }
+    }
+
+
     fn move_cursor(&mut self, direction: crate::tty::control_code::Direction, steps: u16) {
         use crate::tty::control_code::Direction;
 

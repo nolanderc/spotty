@@ -23,6 +23,8 @@ pub trait Terminal {
     /// `\n`
     fn line_feed(&mut self);
 
+    fn reverse_line_feed(&mut self);
+
     /// Move the cursor in the given direction
     fn move_cursor(&mut self, direction: Direction, steps: u16);
 
@@ -228,6 +230,8 @@ fn parse_escape_sequence(bytes: ByteIter, terminal: &mut impl Terminal) -> Parse
             bytes.next().ok_or(ParseError::Incomplete)?;
         }
 
+        b'M' => terminal.reverse_line_feed(),
+
         _ => return Err(ParseError::Invalid),
     }
 
@@ -415,6 +419,29 @@ fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) ->
             arg @ 40..=47 => terminal.set_background_color(Color::Index(arg as u8 - 30)),
             arg @ 100..=107 => terminal.set_background_color(Color::Index(arg as u8 - 100)),
             49 => terminal.reset_background_color(),
+
+            38 => match arguments.next()?.with_default(0) {
+                5 => terminal
+                    .set_foreground_color(Color::Index(arguments.next()?.with_default(0) as u8)),
+                2 => {
+                    let r = arguments.next()?.with_default(0) as u8;
+                    let g = arguments.next()?.with_default(0) as u8;
+                    let b = arguments.next()?.with_default(0) as u8;
+                    terminal.set_foreground_color(Color::Rgb([r, g, b]));
+                }
+                _ => return Err(ParseError::Invalid),
+            },
+            48 => match arguments.next()?.with_default(0) {
+                5 => terminal
+                    .set_background_color(Color::Index(arguments.next()?.with_default(0) as u8)),
+                2 => {
+                    let r = arguments.next()?.with_default(0) as u8;
+                    let g = arguments.next()?.with_default(0) as u8;
+                    let b = arguments.next()?.with_default(0) as u8;
+                    terminal.set_background_color(Color::Rgb([r, g, b]));
+                }
+                _ => return Err(ParseError::Invalid),
+            },
 
             _ => return Err(ParseError::Invalid),
         }
