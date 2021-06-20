@@ -18,4 +18,5 @@ lazy_static = "1.4.0"
 metal = "0.22.0"
 nix = "0.21.0"
 objc = { version = "0.2.7", features = ["exception"] }
-thiserror = "1.0.25"
+tracing = { version = "0.1.26", default-features = false }
+tracing-subscriber = { version = "0.2.18", features = ["fmt", "env-filter"], default-features = false }

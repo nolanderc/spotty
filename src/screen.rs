@@ -2,80 +2,77 @@ pub struct Screen {
     pub title: String,
 
     pub grid: crate::grid::CharacterGrid,
-    pub cursor: crate::grid::Position,
-    pub styles: crate::tty::control_code::CharacterStyles,
+    pub alternate_grid: crate::grid::CharacterGrid,
 
+    pub cursor: crate::grid::Position,
+    pub saved_cursor: crate::grid::Position,
+
+    pub style: crate::tty::control_code::CharacterStyles,
     pub foreground: crate::color::Color,
     pub background: crate::color::Color,
+
+    pub behaviours: Behaviours,
 
     /// Output from the shell that hasn't been parsed yet due to needing more bytes.
     residual_input: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Behaviours {
+    pub show_cursor: bool,
+    pub alternate_buffer: bool,
+}
+
+impl Default for Behaviours {
+    fn default() -> Self {
+        Behaviours {
+            show_cursor: true,
+            alternate_buffer: false,
+        }
+    }
+}
+
 impl Screen {
     pub fn new(grid_size: [u16; 2]) -> Screen {
-        let grid = crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]);
-        let cursor = crate::grid::Position::new(0, 0);
-
         Screen {
             title: String::from("spotty"),
 
-            grid,
-            cursor,
-            styles: crate::tty::control_code::CharacterStyles::empty(),
+            grid: crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]),
+            alternate_grid: crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]),
 
+            cursor: crate::grid::Position::new(0, 0),
+            saved_cursor: crate::grid::Position::new(0, 0),
+
+            style: crate::tty::control_code::CharacterStyles::empty(),
             foreground: crate::color::DEFAULT_FOREGROUND,
             background: crate::color::DEFAULT_BACKGROUND,
 
             residual_input: Vec::new(),
+
+            behaviours: Behaviours::default(),
         }
+    }
+
+    pub fn resize_grid(&mut self, grid_size: [u16; 2]) {
+        self.grid = crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]);
+        self.alternate_grid = crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]);
+        self.cursor = crate::grid::Position::new(0, 0);
     }
 
     pub fn process_input(&mut self, input: &[u8]) {
         let mut bytes;
 
-        let residual = if self.residual_input.is_empty() {
-            crate::tty::control_code::parse(input, self)
+        let bytes = if self.residual_input.is_empty() {
+            input
         } else {
             bytes = Vec::with_capacity(self.residual_input.len() + input.len());
             bytes.append(&mut self.residual_input);
             bytes.extend_from_slice(input);
-
-            crate::tty::control_code::parse(&bytes, self)
+            &bytes
         };
 
+        let residual = crate::tty::control_code::parse(bytes, self);
         self.residual_input.extend_from_slice(residual);
-    }
-
-    pub fn advance_column(&mut self) {
-        if self.cursor.col < self.grid.max_col() {
-            self.cursor.col += 1;
-        } else {
-            self.cursor.col = 0;
-            self.advance_row();
-        }
-    }
-
-    pub fn advance_row(&mut self) {
-        if self.cursor.row < self.grid.max_row() {
-            self.cursor.row += 1;
-        } else {
-            self.grid.scroll_up(1);
-        }
-    }
-
-    pub fn clear_current_line(&mut self, columns: impl std::ops::RangeBounds<u16>) {
-        self.grid
-            .clear_region(self.cursor.row..=self.cursor.row, columns)
-    }
-
-    fn get_color(&self, color: crate::tty::control_code::Color) -> crate::color::Color {
-        match color {
-            crate::tty::control_code::Color::Index(index) => {
-                crate::color::DEFAULT_PALETTE[index as usize]
-            }
-            crate::tty::control_code::Color::Rgb(rgb) => rgb.into(),
-        }
     }
 }
 
@@ -83,29 +80,31 @@ impl Screen {
 impl crate::tty::control_code::Terminal for Screen {
     fn invalid_control_sequence(&mut self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
-        eprintln!("invalid control sequence: {:?}", text);
+        warn!(?text, "invalid control sequence");
     }
 
     fn text(&mut self, text: &str) {
+        debug!(?text);
+
         for ch in text.chars() {
-            self.grid[self.cursor] = crate::grid::GridCell {
-                character: ch,
-                foreground: self.foreground,
-                background: self.background,
-            };
-            self.advance_column();
+            self.insert_char(ch);
         }
     }
 
     fn invalid_utf8(&mut self, text: &[u8]) {
-        todo!("buffer command: invalid_utf8")
+        warn!(?text, "invalid_utf8");
+
+        let mut buffer = [0u8; 4];
+        self.text(char::REPLACEMENT_CHARACTER.encode_utf8(&mut buffer));
     }
 
     fn bell(&mut self) {
-        eprintln!("Bell!!!");
+        trace!("bell");
     }
 
     fn tab(&mut self) {
+        trace!("tab");
+
         loop {
             self.advance_column();
             if self.cursor.col % 8 == 0 {
@@ -115,6 +114,8 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn backspace(&mut self) {
+        trace!("backspace");
+
         if self.cursor.col > 0 {
             self.cursor.col -= 1;
         } else {
@@ -123,25 +124,31 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn carriage_return(&mut self) {
+        trace!("carriage_return");
+
         self.cursor.col = 0
     }
 
     fn line_feed(&mut self) {
-        self.cursor.col = 0;
+        trace!("line_feed");
+
         self.advance_row();
     }
 
     fn reverse_line_feed(&mut self) {
+        trace!("reverse_line_feed");
+
         self.cursor.col = 0;
         if self.cursor.row > 0 {
             self.cursor.row += 1;
         } else {
-            self.grid.scroll_down(1);
+            self.grid.scroll_down(1, self.empty_cell());
         }
     }
 
-
     fn move_cursor(&mut self, direction: crate::tty::control_code::Direction, steps: u16) {
+        debug!(?direction, ?steps, "move_cursor");
+
         use crate::tty::control_code::Direction;
 
         match direction {
@@ -165,11 +172,24 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn set_cursor_pos(&mut self, row: u16, col: u16) {
+        debug!(?row, ?col, "set_cursor_pos");
+
         self.cursor.row = row.min(self.grid.max_row());
         self.cursor.col = col.min(self.grid.max_col());
     }
 
+    fn save_cursor(&mut self) {
+        self.saved_cursor = self.cursor;
+    }
+
+    fn restore_cursor(&mut self) {
+        self.cursor.row = self.saved_cursor.row.min(self.grid.max_row());
+        self.cursor.col = self.saved_cursor.col.min(self.grid.max_col());
+    }
+
     fn clear_line(&mut self, region: crate::tty::control_code::ClearRegion) {
+        debug!(?region, "clear_line");
+
         match region {
             crate::tty::control_code::ClearRegion::ToEnd => {
                 self.clear_current_line(self.cursor.col..)
@@ -182,16 +202,18 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn clear_screen(&mut self, region: crate::tty::control_code::ClearRegion) {
+        debug!(?region, "clear_screen");
+
         match region {
             crate::tty::control_code::ClearRegion::ToEnd => {
                 self.clear_current_line(self.cursor.col..);
-                self.grid.clear_region(self.cursor.row + 1.., ..);
+                self.clear_region(self.cursor.row + 1.., ..);
             }
             crate::tty::control_code::ClearRegion::ToStart => {
-                self.grid.clear_region(..self.cursor.row, ..);
+                self.clear_region(..self.cursor.row, ..);
                 self.clear_current_line(..=self.cursor.col);
             }
-            crate::tty::control_code::ClearRegion::All => self.grid.clear_region(.., ..),
+            crate::tty::control_code::ClearRegion::All => self.clear_region(.., ..),
         }
     }
 
@@ -199,39 +221,127 @@ impl crate::tty::control_code::Terminal for Screen {
         todo!("buffer command: clear_scrollback")
     }
 
-    fn set_bracketed_paste(&mut self, toggle: crate::tty::control_code::Toggle) {
-        eprintln!("TODO: buffer command: set_bracketed_paste")
-    }
-
-    fn set_application_cursor(&mut self, toggle: crate::tty::control_code::Toggle) {
-        eprintln!("TODO: buffer command: set_application_cursor")
+    fn erase(&mut self, count: u16) {
+        debug!(?count, "erase characters");
+        self.clear_current_line(self.cursor.col..self.cursor.col.saturating_add(count));
     }
 
     fn set_character_style(&mut self, style: crate::tty::control_code::CharacterStyles) {
-        self.styles.insert(style);
+        debug!(?style, "set_character_style");
+        self.style.insert(style);
     }
 
     fn reset_character_style(&mut self, style: crate::tty::control_code::CharacterStyles) {
-        self.styles.remove(style);
+        debug!(?style, "reset_character_style");
+        self.style.remove(style);
     }
 
     fn set_foreground_color(&mut self, color: crate::tty::control_code::Color) {
+        debug!(?color, "set_foreground_color");
         self.foreground = self.get_color(color);
     }
 
     fn reset_foreground_color(&mut self) {
+        debug!("reset_foreground_color");
         self.foreground = crate::color::DEFAULT_FOREGROUND;
     }
 
     fn set_background_color(&mut self, color: crate::tty::control_code::Color) {
+        debug!(?color, "set_background_color");
         self.background = self.get_color(color);
     }
 
     fn reset_background_color(&mut self) {
+        debug!("reset_background_color");
         self.background = crate::color::DEFAULT_BACKGROUND;
     }
 
     fn set_window_title(&mut self, text: &str) {
+        debug!(?text, "set_window_title");
         self.title = text.to_owned();
+    }
+
+    fn toggle_behaviour(
+        &mut self,
+        behaviour: crate::tty::control_code::Behaviour,
+        toggle: crate::tty::control_code::Toggle,
+    ) {
+        debug!(?behaviour, ?toggle, "toggle_behaviour");
+
+        use crate::tty::control_code::Behaviour;
+
+        match behaviour {
+            Behaviour::ShowCursor => self.behaviours.show_cursor = toggle.is_enabled(),
+            Behaviour::AlternateBuffer => {
+                if toggle.is_enabled() != self.behaviours.alternate_buffer {
+                    self.behaviours.alternate_buffer = toggle.is_enabled();
+                    std::mem::swap(&mut self.grid, &mut self.alternate_grid);
+                }
+            }
+            _ => warn!(?behaviour, ?toggle, "unimplemented behaviour"),
+        }
+    }
+}
+
+impl Screen {
+    fn advance_column(&mut self) {
+        if self.cursor.col < self.grid.cols() {
+            self.cursor.col += 1;
+        } else {
+            self.cursor.col = 0;
+            self.advance_row();
+        }
+    }
+
+    fn advance_row(&mut self) {
+        if self.cursor.row < self.grid.max_row() {
+            self.cursor.row += 1;
+        } else {
+            self.grid.scroll_up(1, self.empty_cell());
+        }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if self.cursor.col == self.grid.cols() {
+            self.cursor.col = 0;
+            self.advance_row();
+        }
+
+        self.grid[self.cursor] = crate::grid::GridCell {
+            character: ch,
+            ..self.empty_cell()
+        };
+        self.advance_column();
+    }
+
+    fn clear_current_line(&mut self, columns: impl std::ops::RangeBounds<u16>) {
+        self.clear_region(self.cursor.row..=self.cursor.row, columns)
+    }
+
+    fn clear_region(
+        &mut self,
+        rows: impl std::ops::RangeBounds<u16>,
+        columns: impl std::ops::RangeBounds<u16>,
+    ) {
+        let cell = self.empty_cell();
+        self.grid.fill_region(rows, columns, cell);
+    }
+
+    fn empty_cell(&self) -> crate::grid::GridCell {
+        crate::grid::GridCell {
+            character: ' ',
+            foreground: self.foreground,
+            background: self.background,
+            style: self.style,
+        }
+    }
+
+    fn get_color(&self, color: crate::tty::control_code::Color) -> crate::color::Color {
+        match color {
+            crate::tty::control_code::Color::Index(index) => {
+                crate::color::DEFAULT_PALETTE[index as usize]
+            }
+            crate::tty::control_code::Color::Rgb(rgb) => rgb.into(),
+        }
     }
 }

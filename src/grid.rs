@@ -21,6 +21,7 @@ pub struct GridCell {
     pub character: char,
     pub foreground: crate::color::Color,
     pub background: crate::color::Color,
+    pub style: crate::tty::control_code::CharacterStyles,
 }
 
 impl GridCell {
@@ -29,6 +30,7 @@ impl GridCell {
             character: ' ',
             foreground: crate::color::Color::BLACK,
             background: crate::color::Color::BLACK,
+            style: crate::tty::control_code::CharacterStyles::empty(),
         }
     }
 }
@@ -82,28 +84,29 @@ impl CharacterGrid {
         self.rows - 1
     }
 
-    pub fn scroll_up(&mut self, rows: u16) {
+    pub fn scroll_up(&mut self, rows: u16, fill: GridCell) {
         let width = self.cols as usize;
         let new_start = width * rows as usize;
         let new_end = self.cells.len() - new_start;
 
         self.cells.copy_within(new_start.., 0);
-        self.cells[new_end..].fill(GridCell::empty());
+        self.cells[new_end..].fill(fill);
     }
 
-    pub fn scroll_down(&mut self, rows: u16) {
+    pub fn scroll_down(&mut self, rows: u16, fill: GridCell) {
         let width = self.cols as usize;
         let new_start = width * rows as usize;
         let new_end = self.cells.len() - new_start;
 
         self.cells.copy_within(..new_end, new_start);
-        self.cells[..new_start].fill(GridCell::empty());
+        self.cells[..new_start].fill(fill);
     }
 
-    pub fn clear_region(
+    pub fn fill_region(
         &mut self,
         row_range: impl std::ops::RangeBounds<u16>,
         col_range: impl std::ops::RangeBounds<u16>,
+        cell: GridCell,
     ) {
         fn into_exclusive_range(
             range: impl std::ops::RangeBounds<u16>,
@@ -121,7 +124,7 @@ impl CharacterGrid {
                 std::ops::Bound::Unbounded => max,
             };
 
-            start..end.min(max)
+            start.min(max)..end.min(max)
         }
 
         let rows = into_exclusive_range(row_range, self.rows);
@@ -131,7 +134,7 @@ impl CharacterGrid {
         if columns.start == 0 && columns.end == self.max_col() {
             let row_start = rows.start as usize * self.cols as usize;
             let row_end = rows.end as usize * self.cols as usize;
-            self.cells[row_start..row_end].fill(GridCell::empty());
+            self.cells[row_start..row_end].fill(cell);
         } else {
             for row in rows {
                 let row_index = row as usize * self.cols as usize;
@@ -139,7 +142,7 @@ impl CharacterGrid {
                 let row_start = columns.start as usize + row_index;
                 let row_end = columns.end as usize + row_index;
 
-                self.cells[row_start..row_end].fill(GridCell::empty());
+                self.cells[row_start..row_end].fill(cell);
             }
         }
     }
@@ -177,6 +180,11 @@ impl std::ops::IndexMut<Position> for CharacterGrid {
 
 impl std::fmt::Debug for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}, {}]", self.row, self.col)
+        write!(f, "[")?;
+        self.row.fmt(f)?;
+        write!(f, ", ")?;
+        self.col.fmt(f)?;
+        write!(f, "]")?;
+        Ok(())
     }
 }

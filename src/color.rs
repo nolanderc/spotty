@@ -48,13 +48,13 @@ pub static DEFAULT_PALETTE: [Color; 256] = {
     let mut colors = [Color::new(0, 0, 0); 256];
 
     // Base 16 colors
-    colors[0x0] = Color::from_u32_rgb(0x_33_33_33);
-    colors[0x1] = Color::from_u32_rgb(0x_aa_33_33);
-    colors[0x2] = Color::from_u32_rgb(0x_33_aa_33);
-    colors[0x3] = Color::from_u32_rgb(0x_aa_aa_33);
-    colors[0x4] = Color::from_u32_rgb(0x_33_33_aa);
-    colors[0x5] = Color::from_u32_rgb(0x_aa_33_aa);
-    colors[0x6] = Color::from_u32_rgb(0x_33_aa_aa);
+    colors[0x0] = Color::from_u32_rgb(0x_00_00_00);
+    colors[0x1] = Color::from_u32_rgb(0x_aa_11_11);
+    colors[0x2] = Color::from_u32_rgb(0x_11_aa_11);
+    colors[0x3] = Color::from_u32_rgb(0x_aa_aa_11);
+    colors[0x4] = Color::from_u32_rgb(0x_11_11_aa);
+    colors[0x5] = Color::from_u32_rgb(0x_aa_11_aa);
+    colors[0x6] = Color::from_u32_rgb(0x_11_aa_aa);
     colors[0x7] = Color::from_u32_rgb(0x_aa_aa_aa);
 
     colors[0x8] = Color::from_u32_rgb(0x_55_55_55);

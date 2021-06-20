@@ -9,6 +9,8 @@ pub struct Renderer {
     pipeline: metal::RenderPipelineState,
 
     character_vertices: buffer::Buffer<super::Vertex>,
+    cell_vertices: buffer::Buffer<super::Vertex>,
+
     window_buffer: buffer::Buffer<WindowUniforms>,
     size: crate::window::PhysicalSize,
 
@@ -89,6 +91,7 @@ impl Renderer {
         };
 
         let character_vertices = buffer::Buffer::new(0, &device);
+        let cell_vertices = buffer::Buffer::new(0, &device);
 
         let window_buffer = {
             let uniforms = WindowUniforms {
@@ -135,7 +138,10 @@ impl Renderer {
             queue,
             layer,
             pipeline,
+
             character_vertices,
+            cell_vertices,
+
             window_buffer,
             size: inner_size,
 
@@ -160,8 +166,12 @@ impl Renderer {
         self.glyphs = super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE);
     }
 
-    pub fn render(&mut self, grid: &crate::grid::CharacterGrid, cursor: super::CursorState) {
-        self.update_character_vertices(grid);
+    pub fn render(
+        &mut self,
+        grid: &crate::grid::CharacterGrid,
+        cursor: Option<super::CursorState>,
+    ) {
+        self.update_grid_buffers(grid);
 
         let drawable = self.layer.next_drawable().unwrap();
 
@@ -172,13 +182,16 @@ impl Renderer {
         encoder.set_render_pipeline_state(&self.pipeline);
         encoder.set_fragment_texture(0, Some(&self.font_atlas));
 
+        self.render_cells(encoder);
         self.render_characters(encoder);
 
         if false {
             self.render_font_atlas(encoder)
         }
 
-        self.render_cursor(encoder, cursor);
+        if let Some(cursor) = cursor {
+            self.render_cursor(encoder, cursor);
+        }
 
         encoder.end_encoding();
         command_buffer.present_drawable(&drawable);
@@ -200,7 +213,22 @@ impl Renderer {
         command_buffer.new_render_command_encoder(&desc)
     }
 
+    fn render_cells(&self, encoder: &metal::RenderCommandEncoderRef) {
+        encoder.set_fragment_texture(0, Some(&self.white_texture));
+        encoder.set_vertex_buffers(
+            0,
+            &[Some(&self.cell_vertices), Some(&self.window_buffer)],
+            &[0; 2],
+        );
+        encoder.draw_primitives(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            self.cell_vertices.len() as u64,
+        );
+    }
+
     fn render_characters(&self, encoder: &metal::RenderCommandEncoderRef) {
+        encoder.set_fragment_texture(0, Some(&self.font_atlas));
         encoder.set_vertex_buffers(
             0,
             &[Some(&self.character_vertices), Some(&self.window_buffer)],
@@ -215,6 +243,7 @@ impl Renderer {
 
     fn render_font_atlas(&self, encoder: &metal::RenderCommandEncoderRef) {
         let atlas_vertices = self.create_atlas_vertices();
+        encoder.set_fragment_texture(0, Some(&self.font_atlas));
         encoder.set_vertex_buffers(
             0,
             &[Some(&atlas_vertices), Some(&self.window_buffer)],
@@ -271,31 +300,60 @@ impl Renderer {
     }
 
     // TODO: do this in a compute shader instead
-    fn update_character_vertices(&mut self, grid: &crate::grid::CharacterGrid) {
+    fn update_grid_buffers(&mut self, grid: &crate::grid::CharacterGrid) {
+        use crate::tty::control_code::CharacterStyles;
+
         let cols = grid.cols();
         let rows = grid.rows();
 
-        let mut quads = Vec::<[super::Vertex; 6]>::with_capacity(cols as usize * rows as usize);
+        let mut cell_quads = Vec::with_capacity(cols as usize * rows as usize);
+        let mut character_quads = Vec::with_capacity(cols as usize * rows as usize);
 
         let font_metrics = *self.glyphs.font().metrics();
+        let advance = font_metrics.advance;
+        let descent = font_metrics.descent;
+        let line_height = font_metrics.line_height;
 
         for row in 0..rows {
             for col in 0..cols {
                 let cell = grid[crate::grid::Position::new(row, col)];
-                let glyph = self.get_glyph(cell.character);
-                let foreground = cell.foreground.into_rgba_f32();
 
-                let baseline_x = col as f32 * font_metrics.advance;
-                let baseline_y = (1 + row) as f32 * font_metrics.line_height - font_metrics.descent;
+                let mut background = cell.background.into_rgba_f32();
+                let mut foreground = cell.foreground.into_rgba_f32();
 
-                let quad = super::Vertex::glyph_quad(glyph, [baseline_x, baseline_y], foreground);
+                if cell.style.contains(CharacterStyles::INVERSE) {
+                    std::mem::swap(&mut background, &mut foreground);
+                }
 
-                quads.push(quad);
+                let cell_left = col as f32 * advance;
+                let cell_bottom = (1 + row) as f32 * line_height;
+
+                let baseline_x = cell_left;
+                let baseline_y = cell_bottom - descent.ceil();
+
+                cell_quads.push(super::Vertex::quad(
+                    [
+                        cell_left,
+                        cell_left + advance,
+                        cell_bottom,
+                        cell_bottom - line_height,
+                    ],
+                    [0.0, 0.0, 0.0, 0.0],
+                    background,
+                ));
+
+                character_quads.push(super::Vertex::glyph_quad(
+                    self.get_glyph(cell.character),
+                    [baseline_x, baseline_y],
+                    foreground,
+                ));
             }
         }
 
+        self.cell_vertices
+            .update(bytemuck::cast_slice(&cell_quads), &self.device);
         self.character_vertices
-            .update(bytemuck::cast_slice(&quads), &self.device);
+            .update(bytemuck::cast_slice(&character_quads), &self.device);
     }
 
     fn get_glyph(&mut self, ch: char) -> super::glyph_cache::Glyph {

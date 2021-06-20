@@ -1,11 +1,14 @@
+mod color;
 mod font;
 mod grid;
-mod inline_str;
+mod inline;
 mod render;
 mod screen;
 mod tty;
 mod window;
-mod color;
+
+#[macro_use]
+extern crate tracing;
 
 use std::sync::Arc;
 
@@ -19,7 +22,7 @@ impl Drop for Foo {
 }
 
 fn main() {
-    let link = tty::PsuedoterminalLink::create().unwrap();
+    setup_logging();
 
     let event_loop = window::EventLoop::new();
     let window = window::Window::new(
@@ -36,12 +39,13 @@ fn main() {
     let screen = screen::Screen::new(grid_size);
 
     let waker = event_loop.create_waker();
-    let pty = tty::Psuedoterminal::connect(link, waker);
+    let pty = tty::Psuedoterminal::connect(waker).unwrap();
     pty.set_grid_size(screen.grid.size());
 
     let mut terminal = Terminal {
         pty,
         window,
+        waker: event_loop.create_waker(),
         renderer,
         font,
         screen,
@@ -65,9 +69,16 @@ fn load_font(scale_factor: f64) -> font::Font {
     font::Font::with_name("Iosevka SS14", font_size * scale_factor).expect("failed to load font")
 }
 
+fn setup_logging() {
+    use tracing_subscriber::{EnvFilter, FmtSubscriber};
+    let env_filter = EnvFilter::new(std::env::var("RUST_LOG").as_deref().unwrap_or("info"));
+    FmtSubscriber::builder().with_env_filter(env_filter).init();
+}
+
 pub struct Terminal {
     pty: tty::Psuedoterminal,
     window: window::Window,
+    waker: window::EventLoopWaker,
     renderer: render::Renderer,
 
     font: Arc<font::Font>,
@@ -86,8 +97,7 @@ impl Terminal {
 
         if old_grid_size != new_grid_size {
             self.pty.set_grid_size(new_grid_size);
-            self.screen.grid = grid::CharacterGrid::new(new_grid_size[0], new_grid_size[1]);
-            self.screen.cursor = grid::Position::new(0, 0);
+            self.screen.resize_grid(new_grid_size);
         }
     }
 
@@ -102,31 +112,36 @@ impl Terminal {
             window::Key::Char(ch) => {
                 use window::Modifiers;
                 if modifiers.is_empty() || modifiers == Modifiers::SHIFT {
-                    self.pty.send_char(ch);
+                    let mut buffer = [0u8; 4];
+                    let encoded = ch.encode_utf8(&mut buffer);
+                    self.pty.send(encoded.as_bytes());
                 } else if modifiers.contains(Modifiers::CONTROL) && ch.is_ascii_alphabetic() {
                     let byte = (ch as u8).to_ascii_lowercase();
-                    self.pty.send_char((byte - b'a' + 1) as char);
+                    self.pty.send(byte - b'a' + 1);
                 } else {
                     eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
                 }
             }
 
-            window::Key::Escape => self.pty.send_char('\x1b'),
+            window::Key::Escape => self.pty.send(b"\x1b"),
 
-            window::Key::Enter => self.pty.send_char('\n'),
-            window::Key::Backspace => self.pty.send_char('\x08'),
-            window::Key::Tab => self.pty.send_char('\t'),
+            window::Key::Enter => self.pty.send(b"\r"),
+            window::Key::Backspace => self.pty.send(b"\x08"),
+            window::Key::Tab => self.pty.send(b"\t"),
 
-            window::Key::ArrowUp => write!(self.pty, "\x1b[A"),
-            window::Key::ArrowDown => write!(self.pty, "\x1b[B"),
-            window::Key::ArrowRight => write!(self.pty, "\x1b[C"),
-            window::Key::ArrowLeft => write!(self.pty, "\x1b[D"),
+            window::Key::ArrowUp => self.pty.send(b"\x1b[A"),
+            window::Key::ArrowDown => self.pty.send(b"\x1b[B"),
+            window::Key::ArrowRight => self.pty.send(b"\x1b[C"),
+            window::Key::ArrowLeft => self.pty.send(b"\x1b[D"),
         }
     }
 
     pub fn poll_input(&mut self) {
+        let start_poll = std::time::Instant::now();
+        let max_poll_duration = std::time::Duration::from_millis(10);
+
         loop {
-            match self.pty.try_read() {
+            match self.pty.read_timeout(std::time::Duration::from_millis(1)) {
                 Ok(input) => self.screen.process_input(&input),
                 Err(tty::TryReadError::Empty) => break,
                 Err(tty::TryReadError::Closed) => {
@@ -134,14 +149,23 @@ impl Terminal {
                     return;
                 }
             }
+
+            if start_poll.elapsed() > max_poll_duration {
+                self.waker.wake();
+                break;
+            }
         }
     }
 
     pub fn render(&mut self) {
         self.renderer.render(
             &self.screen.grid,
-            render::CursorState {
-                position: self.screen.cursor,
+            if self.screen.behaviours.show_cursor {
+                Some(render::CursorState {
+                    position: self.screen.cursor,
+                })
+            } else {
+                None
             },
         );
     }

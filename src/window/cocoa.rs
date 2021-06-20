@@ -301,7 +301,7 @@ extern "C" fn key_down(_this: &Object, _cmd: Sel, event: CocoaId) {
         let modifiers = get_event_modifiers(event);
 
         match event.keyCode() {
-            0x1b => HANDLER.send(KeyPress(Key::Escape, modifiers)),
+            0x35 => HANDLER.send(KeyPress(Key::Escape, modifiers)),
 
             0x24 | 0x4c => HANDLER.send(KeyPress(Key::Enter, modifiers)),
             0x33 => HANDLER.send(KeyPress(Key::Backspace, modifiers)),

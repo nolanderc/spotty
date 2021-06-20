@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 pub trait Terminal {
     fn invalid_control_sequence(&mut self, bytes: &[u8]);
 
@@ -31,6 +33,12 @@ pub trait Terminal {
     /// Sets the position of the cursor relative to the top-left corner (0-indexed)
     fn set_cursor_pos(&mut self, row: u16, col: u16);
 
+    /// Saves the current cursor
+    fn save_cursor(&mut self);
+
+    /// Restores the saved cursor
+    fn restore_cursor(&mut self);
+
     // === CLEARING === //
 
     /// Clear from cursor to the end of the line
@@ -42,13 +50,7 @@ pub trait Terminal {
     /// Clear scrollback buffer
     fn clear_scrollback(&mut self);
 
-    // === BEHAVIOUR === //
-
-    /// If enabled: surround text pasted into terminal with `ESC [200~` and `ESC [201~`
-    fn set_bracketed_paste(&mut self, toggle: Toggle);
-
-    /// If enabled: arrow keys should send application codes instead of ANSI codes
-    fn set_application_cursor(&mut self, toggle: Toggle);
+    fn erase(&mut self, count: u16);
 
     // === CHARACTER STYLE === //
 
@@ -76,14 +78,24 @@ pub trait Terminal {
 
     /// Set the title of the window
     fn set_window_title(&mut self, text: &str);
-}
 
-pub trait Window {}
+    // === BEHAVIOUR === //
+
+    /// If enabled: arrow keys should send application codes instead of ANSI codes
+    fn toggle_behaviour(&mut self, behaviour: Behaviour, toggle: Toggle);
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Toggle {
-    Enable,
-    Disable,
+    Enabled,
+    Disabled,
+}
+
+impl Toggle {
+    /// Returns `true` if the toggle is [`Enabled`].
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -102,6 +114,42 @@ pub enum Color {
     Index(u8),
     /// Use a specific RGB color
     Rgb([u8; 3]),
+}
+
+macro_rules! enumeration {
+    (
+        $(#[$attr:meta])*
+        $vis:vis enum $ident:ident : $repr:ident {
+            $( $variant:ident = $value:literal ),* $(,)?
+        }
+    ) => {
+        $(#[$attr])*
+        #[repr($repr)]
+        $vis enum $ident {
+            $( $variant = $value ),*
+        }
+
+        impl std::convert::TryFrom<$repr> for $ident {
+            type Error = ();
+
+            fn try_from(value: $repr) -> Result<$ident, ()> {
+                match value {
+                    $( $value => Ok($ident::$variant), )*
+                    _ => Err(())
+                }
+            }
+        }
+    }
+}
+
+enumeration! {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+    pub enum Behaviour: u16 {
+        ApplicationCursor = 1,
+        ShowCursor        = 25,
+        AlternateBuffer   = 47,
+        BracketedPaste    = 2004,
+    }
 }
 
 #[allow(non_snake_case)]
@@ -124,11 +172,6 @@ pub enum Direction {
     Down,
     Left,
     Right,
-}
-
-struct ControlSequenceArguments {
-    values: [u16; 5],
-    count: u8,
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
@@ -316,8 +359,8 @@ fn parse_escape_question_terminator(
     terminal: &mut impl Terminal,
 ) -> ParseResult<()> {
     match terminator {
-        b'h' => parse_question_terminator_toggle(parameters, Toggle::Enable, terminal),
-        b'l' => parse_question_terminator_toggle(parameters, Toggle::Disable, terminal),
+        b'h' => parse_question_terminator_toggle(parameters, Toggle::Enabled, terminal),
+        b'l' => parse_question_terminator_toggle(parameters, Toggle::Disabled, terminal),
         _ => Err(ParseError::Invalid),
     }
 }
@@ -327,10 +370,30 @@ fn parse_question_terminator_toggle(
     toggle: Toggle,
     terminal: &mut impl Terminal,
 ) -> ParseResult<()> {
-    match Argument::single(parameters)?.with_default(0) {
-        1 => terminal.set_application_cursor(toggle),
-        2004 => terminal.set_bracketed_paste(toggle),
-        _ => return Err(ParseError::Invalid),
+    let argument = Argument::single(parameters)?.with_default(0);
+
+    match Behaviour::try_from(argument) {
+        Ok(behaviour) => terminal.toggle_behaviour(behaviour, toggle),
+
+        // Didn't match any behaviour, check for aliases
+        Err(()) => match argument {
+            1047 => terminal.toggle_behaviour(Behaviour::AlternateBuffer, toggle),
+
+            1048 if toggle.is_enabled() => terminal.save_cursor(),
+            1048 => terminal.restore_cursor(),
+
+            1049 if toggle.is_enabled() => {
+                terminal.save_cursor();
+                terminal.toggle_behaviour(Behaviour::AlternateBuffer, toggle);
+                terminal.clear_screen(ClearRegion::All);
+            }
+            1049 => {
+                terminal.toggle_behaviour(Behaviour::AlternateBuffer, toggle);
+                terminal.restore_cursor();
+            }
+
+            _ => return Err(ParseError::Invalid),
+        },
     }
 
     Ok(())
@@ -370,6 +433,8 @@ fn parse_escape_standard_terminator(
             2 => terminal.clear_line(ClearRegion::All),
             _ => return Err(ParseError::Invalid),
         },
+
+        b'X' => terminal.erase(Argument::single(parameters)?.with_default(1)),
 
         _ => return Err(ParseError::Invalid),
     }
@@ -481,334 +546,6 @@ mod util {
         take_while(bytes, |byte| range.contains(&byte))
     }
 }
-
-/*
-pub struct StreamingParser {}
-
-impl StreamingParser {
-    pub fn new() -> StreamingParser {
-        StreamingParser {}
-    }
-
-    pub fn parse_terminal_command<'a>(
-        &mut self,
-        text: &'a str,
-        mut emit: impl FnMut(TerminalCommand),
-    ) -> &'a str {
-        let mut chars = text.chars();
-
-        let mut unprocessed = chars.as_str();
-
-        loop {
-            match chars.next() {
-                None => {
-                    if !unprocessed.is_empty() {
-                        emit(BufferCommand::Text(unprocessed.into()).into());
-                    }
-                    return "";
-                }
-                Some(ch) if ch.is_ascii_control() => {
-                    let remaining_bytes = 1 + chars.as_str().len();
-                    let text_len = unprocessed.len() - remaining_bytes;
-                    if text_len > 0 {
-                        let (text, rest) = unprocessed.split_at(text_len);
-                        emit(BufferCommand::Text(text.into()).into());
-                        unprocessed = rest;
-                    }
-
-                    let parse_result = match ch {
-                        '\x07' => Ok(BufferCommand::Bell.into()),
-                        '\x08' => Ok(BufferCommand::Backspace.into()),
-                        '\x09' => Ok(BufferCommand::Tab.into()),
-                        '\r' => Ok(BufferCommand::CarriageReturn.into()),
-                        '\n' => Ok(BufferCommand::LineFeed.into()),
-                        '\x1b' => match chars.next() {
-                            // Control Sequence
-                            Some('[') => self
-                                .parse_control_sequence(&mut chars)
-                                .map(TerminalCommand::from),
-
-                            // Operating System Command
-                            Some(']') => self
-                                .parse_operating_system_command(&mut chars)
-                                .map(TerminalCommand::from),
-
-                            // sets the character set: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-                            Some('(') => match chars.next() {
-                                None => Err(ParseError::Incomplete),
-                                Some(_) => Err(ParseError::Ignored),
-                            },
-
-                            // Enter alternate keypad mode
-                            Some('=') => Err(ParseError::Ignored),
-
-                            // Exit alternate keypad mode
-                            Some('>') => Err(ParseError::Ignored),
-
-                            Some(_) => Err(ParseError::Invalid),
-                            None => Err(ParseError::Incomplete),
-                        },
-                        _ => Err(ParseError::Invalid),
-                    };
-
-                    match parse_result {
-                        Ok(code) => emit(code),
-                        Err(ParseError::Incomplete) => return unprocessed,
-                        Err(ParseError::Invalid) => {
-                            let len = chars.as_str().len();
-                            let sequence = &unprocessed[..unprocessed.len() - len];
-                            emit(TerminalCommand::Unknown(sequence.into()));
-                        }
-                        Err(ParseError::Ignored) => {
-                            let len = chars.as_str().len();
-                            let sequence = &unprocessed[..unprocessed.len() - len];
-                            emit(TerminalCommand::Ignored(sequence.into()));
-                        }
-                    }
-
-                    unprocessed = chars.as_str();
-                }
-                _ => continue,
-            }
-        }
-    }
-
-    fn parse_control_sequence_parts<'a>(
-        chars: &mut std::str::Chars<'a>,
-    ) -> ParseResult<(&'a str, &'a str, u8)> {
-        let parameters = take_while_in_range(chars, 0x30..=0x3f)?;
-        let intermediate = take_while_in_range(chars, 0x20..=0x2f)?;
-        let terminator = chars.next().ok_or(ParseError::Incomplete)?;
-
-        if ('\x40'..='\x7f').contains(&terminator) {
-            Ok((parameters, intermediate, terminator as u8))
-        } else {
-            Err(ParseError::Invalid)
-        }
-    }
-
-    fn parse_control_sequence(
-        &mut self,
-        chars: &mut std::str::Chars,
-    ) -> ParseResult<BufferCommand> {
-        let (parameters, intermediate, terminator) = Self::parse_control_sequence_parts(chars)?;
-
-        // TODO: figure out how to handle intermediate bytes
-        if !intermediate.is_empty() {
-            return Err(ParseError::Invalid);
-        }
-
-        let parameters = parameters.as_bytes();
-
-        match parameters {
-            [b'?', parameters @ ..] => Self::parse_question_terminator(parameters, terminator),
-            _ => Self::parse_standard_terminator(parameters, terminator),
-        }
-    }
-
-    fn parse_question_terminator(parameters: &[u8], terminator: u8) -> ParseResult<BufferCommand> {
-        let arguments = ControlSequenceArguments::parse(parameters)?;
-
-        match (arguments.as_slice(), terminator) {
-            ([1], b'h') => Ok(BufferCommand::SetApplicationCursor(true)),
-            ([1], b'l') => Ok(BufferCommand::SetApplicationCursor(false)),
-
-            ([2004], b'h') => Ok(BufferCommand::SetBracketedPaste(true)),
-            ([2004], b'l') => Ok(BufferCommand::SetBracketedPaste(false)),
-
-            _ => Err(ParseError::Invalid),
-        }
-    }
-
-    fn parse_standard_terminator(parameters: &[u8], terminator: u8) -> ParseResult<BufferCommand> {
-        let move_cursor = |direction| -> ParseResult<_> {
-            let steps = arg::single(parameters)?.unwrap_or(1);
-            Ok(BufferCommand::MoveCursor { direction, steps })
-        };
-
-        match terminator {
-            b'A' => move_cursor(Direction::Up),
-            b'B' => move_cursor(Direction::Down),
-            b'C' => move_cursor(Direction::Right),
-            b'D' => move_cursor(Direction::Left),
-
-            b'H' => {
-                let [row, col] = arg::multi(parameters, [1, 1])?;
-                Ok(BufferCommand::SetCursorPos([row - 1, col - 1]))
-            }
-
-            b'X' => Ok(BufferCommand::Erase {
-                count: arg::single(parameters)?.unwrap_or(1),
-            }),
-
-            b'J' => match arg::single(parameters)?.unwrap_or(0) {
-                0 => Ok(BufferCommand::ClearScreenToEnd),
-                1 => Ok(BufferCommand::ClearScreenToStart),
-                2 => Ok(BufferCommand::ClearScreen),
-                3 => Ok(BufferCommand::ClearScreenAndScrollback),
-                _ => Err(ParseError::Invalid),
-            },
-
-            b'K' => match arg::single(parameters)?.unwrap_or(0) {
-                0 => Ok(BufferCommand::ClearLineToEnd),
-                1 => Ok(BufferCommand::ClearLineToStart),
-                2 => Ok(BufferCommand::ClearLine),
-                _ => Err(ParseError::Invalid),
-            },
-
-            b'm' => Self::parse_character_attribute(parameters),
-
-            _ => Err(ParseError::Invalid),
-        }
-    }
-
-    fn parse_character_attribute(parameters: &[u8]) -> ParseResult<BufferCommand> {
-        use CharacterAttributes::{
-            ResetBackground, ResetForeground, ResetStyles, SetBackground, SetForeground, SetStyles,
-        };
-
-        let mut attributes = Vec::new();
-
-        for group in parameters.split(|byte| *byte == b';') {
-            let mut arguments = arg::iter(group);
-            let kind = arguments.next().unwrap_or(Ok(None))?.unwrap_or(0);
-
-            let attribute = match kind {
-                0 => CharacterAttributes::ResetAll,
-
-                1 => SetStyles(CharacterStyles::BOLD),
-                21 => ResetStyles(CharacterStyles::BOLD),
-
-                2 => SetStyles(CharacterStyles::FAINT),
-                22 => ResetStyles(CharacterStyles::FAINT),
-
-                3 => SetStyles(CharacterStyles::ITALIC),
-                23 => ResetStyles(CharacterStyles::ITALIC),
-
-                4 => SetStyles(CharacterStyles::UNDERLINE),
-                24 => ResetStyles(CharacterStyles::UNDERLINE),
-
-                5 => SetStyles(CharacterStyles::BLINK),
-                25 => ResetStyles(CharacterStyles::BLINK),
-
-                7 => SetStyles(CharacterStyles::INVERSE),
-                27 => ResetStyles(CharacterStyles::INVERSE),
-
-                8 => SetStyles(CharacterStyles::INVISIBLE),
-                28 => ResetStyles(CharacterStyles::INVISIBLE),
-
-                9 => SetStyles(CharacterStyles::STRIKETHROUGH),
-                29 => ResetStyles(CharacterStyles::STRIKETHROUGH),
-
-                arg @ 30..=37 => SetForeground(Color::Index(arg as u8 - 30)),
-                arg @ 90..=97 => SetForeground(Color::Index(arg as u8 - 90)),
-                39 => ResetForeground,
-
-                arg @ 40..=47 => SetBackground(Color::Index(arg as u8 - 30)),
-                arg @ 100..=107 => SetForeground(Color::Index(arg as u8 - 100)),
-                49 => ResetBackground,
-
-                _ => return Err(ParseError::Invalid),
-            };
-
-            attributes.push(attribute);
-
-            if arguments.next().is_some() {
-                // unexpected argument
-                return Err(ParseError::Invalid);
-            }
-        }
-
-        Ok(BufferCommand::CharacterAttributes(
-            attributes.into_boxed_slice(),
-        ))
-    }
-
-    fn parse_operating_system_command(
-        &self,
-        chars: &mut std::str::Chars,
-    ) -> ParseResult<OsCommand> {
-        let numbers = take_while_in_range(chars, b'0'..=b'9')?;
-        let parameters = take_while_in_range(chars, 0x20..=0x7e)?;
-        let terminator = chars.next().ok_or(ParseError::Incomplete)?;
-
-        if !matches!(terminator, '\x07') {
-            return Err(ParseError::Invalid);
-        }
-
-        let parameters = parameters.strip_prefix(';').ok_or(ParseError::Invalid)?;
-
-        if parameters == "?" {
-            // TODO: this should instead respond with a `TerminalCode::GetWindowTitle` or similar
-            return Err(ParseError::Invalid);
-        }
-
-        match numbers {
-            // Change "icon name" and window title. The former does not apply.
-            "0" => Ok(OsCommand::SetWindowTitle(parameters.into())),
-
-            // Change "icon name" (does not apply)
-            "1" => Err(ParseError::Ignored),
-
-            // Change window title.
-            "2" => Ok(OsCommand::SetWindowTitle(parameters.into())),
-
-            // Set X-property on top-level window (does not apply)
-            "3" => Err(ParseError::Ignored),
-
-            _ => Err(ParseError::Invalid),
-        }
-    }
-}
-
-impl ControlSequenceArguments {
-    pub fn parse(bytes: &[u8]) -> ParseResult<ControlSequenceArguments> {
-        let mut values = [0u16; 5];
-        let mut index = 0;
-
-        for &byte in bytes {
-            match byte {
-                b'0'..=b'9' => {
-                    let digit = u16::from(byte - b'0');
-                    values[index] = values[index]
-                        .checked_mul(10)
-                        .and_then(|value| value.checked_add(digit))
-                        .ok_or(ParseError::Invalid)?;
-                }
-                b':' | b';' => {
-                    index += 1;
-                    if index >= values.len() {
-                        return Err(ParseError::Invalid);
-                    }
-                }
-
-                // reserved for private use
-                _ => return Err(ParseError::Invalid),
-            }
-        }
-
-        Ok(ControlSequenceArguments {
-            values,
-            count: index as u8 + 1,
-        })
-    }
-
-    pub fn get_default(&self, index: usize, default: u16) -> u16 {
-        match self.values[index] {
-            0 => default,
-            value => value,
-        }
-    }
-
-    pub fn get(&self, index: usize) -> u16 {
-        self.values[index]
-    }
-
-    pub fn as_slice(&self) -> &[u16] {
-        &self.values[..self.count as usize]
-    }
-}
-*/
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct Argument {
