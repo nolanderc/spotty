@@ -171,7 +171,11 @@ impl Renderer {
         grid: &crate::grid::CharacterGrid,
         cursor: Option<super::CursorState>,
     ) {
-        self.update_grid_buffers(grid);
+        let block_cursor = cursor
+            .as_ref()
+            .filter(|cursor| cursor.style.shape == crate::tty::control_code::CursorShape::Block);
+
+        self.update_grid_buffers(grid, block_cursor);
 
         let drawable = self.layer.next_drawable().unwrap();
 
@@ -185,12 +189,11 @@ impl Renderer {
         self.render_cells(encoder);
         self.render_characters(encoder);
 
-        if false {
-            self.render_font_atlas(encoder)
-        }
-
-        if let Some(cursor) = cursor {
-            self.render_cursor(encoder, cursor);
+        if block_cursor.is_none() {
+            if let Some(cursor) = cursor {
+                eprintln!("render_cursor");
+                self.render_cursor(encoder, cursor);
+            }
         }
 
         encoder.end_encoding();
@@ -206,7 +209,10 @@ impl Renderer {
 
         let attachment = desc.color_attachments().object_at(0).unwrap();
         attachment.set_texture(Some(target));
-        attachment.set_clear_color(metal::MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
+        attachment.set_clear_color({
+            let [r, g, b, a] = crate::color::DEFAULT_BACKGROUND.into_rgba_f64();
+            metal::MTLClearColor::new(r, g, b, a)
+        });
         attachment.set_load_action(metal::MTLLoadAction::Clear);
         attachment.set_store_action(metal::MTLStoreAction::Store);
 
@@ -285,22 +291,32 @@ impl Renderer {
     }
 
     fn create_cursor_vertices(&self, cursor: super::CursorState) -> buffer::Buffer<super::Vertex> {
-        let [width, height] = crate::font::cell_size(self.glyphs.font());
+        let [cell_width, cell_height] = crate::font::cell_size(self.glyphs.font());
 
-        let x = cursor.position.col as f32 * width;
-        let y = cursor.position.row as f32 * height;
+        let [width, height] = match cursor.style.shape {
+            crate::tty::control_code::CursorShape::Block => [cell_width, cell_height],
+            crate::tty::control_code::CursorShape::Bar => [1.0, cell_height],
+            crate::tty::control_code::CursorShape::Underline => [cell_width, 2.0],
+        };
+
+        let x = cursor.position.col as f32 * cell_width;
+        let y = (1 + cursor.position.row) as f32 * cell_height;
 
         let vertices = super::Vertex::quad(
-            [x, x + width, y, y + height],
+            [x, x + width, y, y - height],
             [0.0, 1.0, 0.0, 1.0],
-            [1.0; 4],
+            cursor.color.into_rgba_f32(),
         );
 
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
     // TODO: do this in a compute shader instead
-    fn update_grid_buffers(&mut self, grid: &crate::grid::CharacterGrid) {
+    fn update_grid_buffers(
+        &mut self,
+        grid: &crate::grid::CharacterGrid,
+        cursor: Option<&super::CursorState>,
+    ) {
         use crate::tty::control_code::CharacterStyles;
 
         let cols = grid.cols();
@@ -314,15 +330,24 @@ impl Renderer {
         let descent = font_metrics.descent;
         let line_height = font_metrics.line_height;
 
+        let invisible = super::CursorState::invisible();
+        let cursor = cursor.unwrap_or(&invisible);
+
         for row in 0..rows {
             for col in 0..cols {
-                let cell = grid[crate::grid::Position::new(row, col)];
+                let pos = crate::grid::Position::new(row, col);
+                let cell = grid[pos];
 
-                let mut background = cell.background.into_rgba_f32();
-                let mut foreground = cell.foreground.into_rgba_f32();
+                let mut background = cell.background;
+                let mut foreground = cell.foreground;
 
                 if cell.style.contains(CharacterStyles::INVERSE) {
                     std::mem::swap(&mut background, &mut foreground);
+                }
+
+                if pos == cursor.position {
+                    foreground = cursor.text_color;
+                    background = cursor.color;
                 }
 
                 let cell_left = col as f32 * advance;
@@ -339,13 +364,13 @@ impl Renderer {
                         cell_bottom - line_height,
                     ],
                     [0.0, 0.0, 0.0, 0.0],
-                    background,
+                    background.into_rgba_f32(),
                 ));
 
                 character_quads.push(super::Vertex::glyph_quad(
                     self.get_glyph(cell.character),
                     [baseline_x, baseline_y],
-                    foreground,
+                    foreground.into_rgba_f32(),
                 ));
             }
         }

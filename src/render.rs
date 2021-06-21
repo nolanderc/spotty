@@ -12,6 +12,20 @@ const FONT_ATLAS_SIZE: usize = 2048;
 
 pub struct CursorState {
     pub position: crate::grid::Position,
+    pub style: crate::tty::control_code::CursorStyle,
+    pub color: crate::color::Color,
+    pub text_color: crate::color::Color,
+}
+
+impl CursorState {
+    pub const fn invisible() -> CursorState {
+        CursorState {
+            position: crate::grid::Position::new(u16::MAX, u16::MAX),
+            style: crate::tty::control_code::CursorStyle::DEFAULT,
+            color: crate::color::Color::BLACK,
+            text_color: crate::color::Color::BLACK,
+        }
+    }
 }
 
 #[repr(C)]
@@ -74,4 +88,3 @@ impl Vertex {
         ]
     }
 }
-

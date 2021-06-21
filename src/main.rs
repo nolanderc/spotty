@@ -65,7 +65,7 @@ fn main() {
 }
 
 fn load_font(scale_factor: f64) -> font::Font {
-    let font_size = 16.0;
+    let font_size = 14.0;
     font::Font::with_name("Iosevka SS14", font_size * scale_factor).expect("failed to load font")
 }
 
@@ -158,15 +158,12 @@ impl Terminal {
     }
 
     pub fn render(&mut self) {
-        self.renderer.render(
-            &self.screen.grid,
-            if self.screen.behaviours.show_cursor {
-                Some(render::CursorState {
-                    position: self.screen.cursor,
-                })
-            } else {
-                None
-            },
-        );
+        let cursor = if self.screen.behaviours.show_cursor {
+            Some(self.screen.cursor_render_state())
+        } else {
+            None
+        };
+
+        self.renderer.render(&self.screen.grid, cursor);
     }
 }

@@ -11,7 +11,7 @@ pub struct Position {
 }
 
 impl Position {
-    pub fn new(row: u16, col: u16) -> Position {
+    pub const fn new(row: u16, col: u16) -> Position {
         Position { row, col }
     }
 }
@@ -28,8 +28,8 @@ impl GridCell {
     pub const fn empty() -> Self {
         GridCell {
             character: ' ',
-            foreground: crate::color::Color::BLACK,
-            background: crate::color::Color::BLACK,
+            foreground: crate::color::DEFAULT_FOREGROUND,
+            background: crate::color::DEFAULT_BACKGROUND,
             style: crate::tty::control_code::CharacterStyles::empty(),
         }
     }
@@ -108,25 +108,6 @@ impl CharacterGrid {
         col_range: impl std::ops::RangeBounds<u16>,
         cell: GridCell,
     ) {
-        fn into_exclusive_range(
-            range: impl std::ops::RangeBounds<u16>,
-            max: u16,
-        ) -> std::ops::Range<u16> {
-            let start = match range.start_bound() {
-                std::ops::Bound::Included(index) => *index,
-                std::ops::Bound::Excluded(index) => *index + 1,
-                std::ops::Bound::Unbounded => 0,
-            };
-
-            let end = match range.end_bound() {
-                std::ops::Bound::Included(index) => *index + 1,
-                std::ops::Bound::Excluded(index) => *index,
-                std::ops::Bound::Unbounded => max,
-            };
-
-            start.min(max)..end.min(max)
-        }
-
         let rows = into_exclusive_range(row_range, self.rows);
         let columns = into_exclusive_range(col_range, self.cols);
 
@@ -145,6 +126,17 @@ impl CharacterGrid {
                 self.cells[row_start..row_end].fill(cell);
             }
         }
+    }
+
+    pub fn copy_rows(&mut self, rows: impl std::ops::RangeBounds<u16>, dst_row: u16) {
+        let rows = into_exclusive_range(rows, self.rows);
+
+        let row_start = rows.start as usize * self.cols as usize;
+        let row_end = rows.end as usize * self.cols as usize;
+
+        let dst_start = dst_row as usize * self.cols as usize;
+
+        self.cells.copy_within(row_start..row_end, dst_start);
     }
 }
 
@@ -187,4 +179,20 @@ impl std::fmt::Debug for Position {
         write!(f, "]")?;
         Ok(())
     }
+}
+
+fn into_exclusive_range(range: impl std::ops::RangeBounds<u16>, max: u16) -> std::ops::Range<u16> {
+    let start = match range.start_bound() {
+        std::ops::Bound::Included(index) => *index,
+        std::ops::Bound::Excluded(index) => *index + 1,
+        std::ops::Bound::Unbounded => 0,
+    };
+
+    let end = match range.end_bound() {
+        std::ops::Bound::Included(index) => *index + 1,
+        std::ops::Bound::Excluded(index) => *index,
+        std::ops::Bound::Unbounded => max,
+    };
+
+    start.min(max)..end.min(max)
 }

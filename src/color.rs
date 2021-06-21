@@ -7,7 +7,6 @@ pub struct Color {
 
 impl Color {
     pub const BLACK: Color = Color::new(0, 0, 0);
-    pub const WHITE: Color = Color::new(0xff, 0xff, 0xff);
 
     pub const fn new(red: u8, green: u8, blue: u8) -> Color {
         Color { red, green, blue }
@@ -33,6 +32,15 @@ impl Color {
             1.0,
         ]
     }
+    
+    pub fn into_rgba_f64(self) -> [f64; 4] {
+        [
+            self.red as f64 / 255.0,
+            self.green as f64 / 255.0,
+            self.blue as f64 / 255.0,
+            1.0,
+        ]
+    }
 }
 
 impl From<[u8; 3]> for Color {
@@ -41,51 +49,57 @@ impl From<[u8; 3]> for Color {
     }
 }
 
-pub static DEFAULT_FOREGROUND: Color = DEFAULT_PALETTE[7];
-pub static DEFAULT_BACKGROUND: Color = DEFAULT_PALETTE[0];
+pub const DEFAULT_FOREGROUND: Color = DEFAULT_PALETTE[15];
+pub const DEFAULT_BACKGROUND: Color = DEFAULT_PALETTE[0];
 
-pub static DEFAULT_PALETTE: [Color; 256] = {
+pub const DEFAULT_CURSOR: Color = DEFAULT_FOREGROUND;
+pub const DEFAULT_CURSOR_TEXT: Color = DEFAULT_BACKGROUND;
+
+pub const DEFAULT_PALETTE: [Color; 256] = {
     let mut colors = [Color::new(0, 0, 0); 256];
 
     // Base 16 colors
-    colors[0x0] = Color::from_u32_rgb(0x_00_00_00);
-    colors[0x1] = Color::from_u32_rgb(0x_aa_11_11);
-    colors[0x2] = Color::from_u32_rgb(0x_11_aa_11);
-    colors[0x3] = Color::from_u32_rgb(0x_aa_aa_11);
-    colors[0x4] = Color::from_u32_rgb(0x_11_11_aa);
-    colors[0x5] = Color::from_u32_rgb(0x_aa_11_aa);
-    colors[0x6] = Color::from_u32_rgb(0x_11_aa_aa);
-    colors[0x7] = Color::from_u32_rgb(0x_aa_aa_aa);
+    colors[0x0] = Color::from_u32_rgb(0x_282828);
+    colors[0x1] = Color::from_u32_rgb(0x_cc241d);
+    colors[0x2] = Color::from_u32_rgb(0x_98871a);
+    colors[0x3] = Color::from_u32_rgb(0x_d79921);
+    colors[0x4] = Color::from_u32_rgb(0x_458588);
+    colors[0x5] = Color::from_u32_rgb(0x_b16286);
+    colors[0x6] = Color::from_u32_rgb(0x_689d6a);
+    colors[0x7] = Color::from_u32_rgb(0x_a89984);
 
-    colors[0x8] = Color::from_u32_rgb(0x_55_55_55);
-    colors[0x9] = Color::from_u32_rgb(0x_ff_55_55);
-    colors[0xa] = Color::from_u32_rgb(0x_55_ff_55);
-    colors[0xb] = Color::from_u32_rgb(0x_ff_ff_55);
-    colors[0xc] = Color::from_u32_rgb(0x_55_55_ff);
-    colors[0xd] = Color::from_u32_rgb(0x_ff_55_ff);
-    colors[0xe] = Color::from_u32_rgb(0x_55_ff_ff);
-    colors[0xf] = Color::from_u32_rgb(0x_ff_ff_ff);
+    colors[0x8] = Color::from_u32_rgb(0x_928374);
+    colors[0x9] = Color::from_u32_rgb(0x_fb4934);
+    colors[0xa] = Color::from_u32_rgb(0x_b8bb26);
+    colors[0xb] = Color::from_u32_rgb(0x_fabd2f);
+    colors[0xc] = Color::from_u32_rgb(0x_83a598);
+    colors[0xd] = Color::from_u32_rgb(0x_d3869b);
+    colors[0xe] = Color::from_u32_rgb(0x_8ec07c);
+    colors[0xf] = Color::from_u32_rgb(0x_ebdbb2);
 
     // 6x6x6 color cube
     {
-        let mut r = 0;
-        let mut g = 0;
-        let mut b = 0;
+        macro_rules! const_for {
+            ($ident:ident in $low:literal..$high:literal $block:block) => {
+                let mut $ident = $low;
+                while $ident < $high {
+                    $block;
+                    $ident += 1;
+                }
+            };
+        }
 
-        while r < 6 {
-            while g < 6 {
-                while b < 6 {
+        const_for!(r in 0..6 {
+            const_for!(g in 0..6 {
+                const_for!(b in 0..6 {
                     colors[16 + 36 * r + 6 * g + b] = Color {
                         red: (255 * r / 6) as u8,
                         green: (255 * g / 6) as u8,
                         blue: (255 * b / 6) as u8,
                     };
-                    b += 1;
-                }
-                g += 1;
-            }
-            r += 1;
-        }
+                });
+            });
+        });
     }
 
     // Grayscale in 24 steps

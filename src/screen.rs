@@ -6,10 +6,13 @@ pub struct Screen {
 
     pub cursor: crate::grid::Position,
     pub saved_cursor: crate::grid::Position,
+    pub cursor_style: crate::tty::control_code::CursorStyle,
 
     pub style: crate::tty::control_code::CharacterStyles,
     pub foreground: crate::color::Color,
     pub background: crate::color::Color,
+
+    pub scrolling_region: std::ops::Range<u16>,
 
     pub behaviours: Behaviours,
 
@@ -42,21 +45,27 @@ impl Screen {
 
             cursor: crate::grid::Position::new(0, 0),
             saved_cursor: crate::grid::Position::new(0, 0),
+            cursor_style: crate::tty::control_code::CursorStyle::DEFAULT,
 
             style: crate::tty::control_code::CharacterStyles::empty(),
             foreground: crate::color::DEFAULT_FOREGROUND,
             background: crate::color::DEFAULT_BACKGROUND,
 
-            residual_input: Vec::new(),
+            scrolling_region: 0..grid_size[0],
 
             behaviours: Behaviours::default(),
+            residual_input: Vec::new(),
         }
     }
 
     pub fn resize_grid(&mut self, grid_size: [u16; 2]) {
         self.grid = crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]);
         self.alternate_grid = crate::grid::CharacterGrid::new(grid_size[0], grid_size[1]);
+
         self.cursor = crate::grid::Position::new(0, 0);
+
+        self.scrolling_region.start = self.scrolling_region.start.min(grid_size[0]);
+        self.scrolling_region.end = self.scrolling_region.end.min(grid_size[0]);
     }
 
     pub fn process_input(&mut self, input: &[u8]) {
@@ -73,6 +82,15 @@ impl Screen {
 
         let residual = crate::tty::control_code::parse(bytes, self);
         self.residual_input.extend_from_slice(residual);
+    }
+
+    pub fn cursor_render_state(&self) -> crate::render::CursorState {
+        crate::render::CursorState {
+            position: self.cursor,
+            style: self.cursor_style,
+            color: crate::color::DEFAULT_CURSOR,
+            text_color: crate::color::DEFAULT_CURSOR_TEXT,
+        }
     }
 }
 
@@ -146,6 +164,38 @@ impl crate::tty::control_code::Terminal for Screen {
         }
     }
 
+    fn delete_lines(&mut self, count: u16) {
+        debug!(?count, "delete_lines");
+
+        let clear_end = self
+            .cursor
+            .row
+            .saturating_add(count)
+            .min(self.scrolling_region.end);
+
+        self.grid.copy_rows(clear_end..self.scrolling_region.end, self.cursor.row);
+
+        let rows_below = self.scrolling_region.end - clear_end;
+        let copy_end = self.cursor.row + rows_below;
+        self.clear_region(copy_end..self.scrolling_region.end, ..)
+    }
+
+    fn insert_lines(&mut self, count: u16) {
+        debug!(?count, "insert_lines");
+
+        let clear_end = self
+            .cursor
+            .row
+            .saturating_add(count)
+            .min(self.scrolling_region.end);
+
+        let rows_below = self.scrolling_region.end - clear_end;
+        let copy_end = self.cursor.row + rows_below;
+        self.grid.copy_rows(self.cursor.row..copy_end, clear_end);
+
+        self.clear_region(self.cursor.row..clear_end, ..);
+    }
+
     fn move_cursor(&mut self, direction: crate::tty::control_code::Direction, steps: u16) {
         debug!(?direction, ?steps, "move_cursor");
 
@@ -179,12 +229,26 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn save_cursor(&mut self) {
+        debug!(?self.cursor, "save_cursor");
         self.saved_cursor = self.cursor;
     }
 
     fn restore_cursor(&mut self) {
+        debug!(?self.saved_cursor, "restore_cursor");
         self.cursor.row = self.saved_cursor.row.min(self.grid.max_row());
         self.cursor.col = self.saved_cursor.col.min(self.grid.max_col());
+    }
+
+    fn set_cursor_style(&mut self, style: crate::tty::control_code::CursorStyle) {
+        debug!(?style, "set_cursor_style");
+        self.cursor_style = style;
+    }
+
+    fn set_scrolling_region(&mut self, rows: std::ops::Range<u16>) {
+        debug!(?rows, "set_scrolling_region");
+
+        self.scrolling_region.start = rows.start.min(self.grid.rows());
+        self.scrolling_region.end = rows.end.min(self.grid.rows());
     }
 
     fn clear_line(&mut self, region: crate::tty::control_code::ClearRegion) {

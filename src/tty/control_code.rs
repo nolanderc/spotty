@@ -12,7 +12,7 @@ pub trait Terminal {
     /// Makes an audible bell
     fn bell(&mut self);
 
-    // === CURSOR MOVEMENT === //
+    // === CURSOR === //
 
     /// Move cursor to next column that is an multiple of 8
     fn tab(&mut self);
@@ -27,6 +27,10 @@ pub trait Terminal {
 
     fn reverse_line_feed(&mut self);
 
+    fn delete_lines(&mut self, count: u16);
+
+    fn insert_lines(&mut self, count: u16);
+
     /// Move the cursor in the given direction
     fn move_cursor(&mut self, direction: Direction, steps: u16);
 
@@ -38,6 +42,14 @@ pub trait Terminal {
 
     /// Restores the saved cursor
     fn restore_cursor(&mut self);
+
+    /// Set the appearance of the cursor
+    fn set_cursor_style(&mut self, style: CursorStyle);
+
+    // === SCROLLING === //
+
+    /// Set the area within which content should scroll.
+    fn set_scrolling_region(&mut self, rows: std::ops::Range<u16>);
 
     // === CLEARING === //
 
@@ -116,6 +128,46 @@ pub enum Color {
     Rgb([u8; 3]),
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct CursorStyle {
+    pub shape: CursorShape,
+    pub blink: CursorBlink,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Bar,
+    Underline,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum CursorBlink {
+    Blinking,
+    Steady,
+}
+
+impl CursorStyle {
+    pub const DEFAULT: Self = CursorStyle {
+        shape: CursorShape::Block,
+        blink: CursorBlink::Blinking,
+    };
+
+    fn blinking(shape: CursorShape) -> CursorStyle {
+        CursorStyle {
+            shape,
+            blink: CursorBlink::Blinking,
+        }
+    }
+
+    fn steady(shape: CursorShape) -> CursorStyle {
+        CursorStyle {
+            shape,
+            blink: CursorBlink::Steady,
+        }
+    }
+}
+
 macro_rules! enumeration {
     (
         $(#[$attr:meta])*
@@ -148,6 +200,7 @@ enumeration! {
         ApplicationCursor = 1,
         ShowCursor        = 25,
         AlternateBuffer   = 47,
+        FocusEvents       = 1004,
         BracketedPaste    = 2004,
     }
 }
@@ -328,14 +381,15 @@ fn parse_operating_system_command(
 fn parse_escape_control_sequence(bytes: ByteIter, terminal: &mut impl Terminal) -> ParseResult<()> {
     let (parameters, intermediate, terminator) = parse_control_sequence_parts(bytes)?;
 
-    // TODO: figure out when to use intermediate bytes
-    if !intermediate.is_empty() {
-        return Err(ParseError::Invalid);
-    }
+    match (parameters, intermediate) {
+        ([b'?', arguments @ ..], b"") => {
+            parse_escape_question_terminator(arguments, terminator, terminal)
+        }
 
-    match parameters {
-        [b'?', arguments @ ..] => parse_escape_question_terminator(arguments, terminator, terminal),
-        arguments => parse_escape_standard_terminator(arguments, terminator, terminal),
+        (arguments, b"") => parse_escape_standard_terminator(arguments, terminator, terminal),
+        (arguments, b" ") => parse_escape_space_terminator(arguments, terminator, terminal),
+
+        _ => Err(ParseError::Invalid),
     }
 }
 
@@ -434,7 +488,17 @@ fn parse_escape_standard_terminator(
             _ => return Err(ParseError::Invalid),
         },
 
+        b'L' => terminal.insert_lines(Argument::single(parameters)?.with_default(1)),
+        b'M' => terminal.delete_lines(Argument::single(parameters)?.with_default(1)),
+
         b'X' => terminal.erase(Argument::single(parameters)?.with_default(1)),
+
+        b'r' => {
+            let [top, bottom] = Argument::multi(parameters)?;
+            let top = top.with_default(1) - 1;
+            let bottom = bottom.to_option().unwrap_or(u16::MAX);
+            terminal.set_scrolling_region(top..bottom);
+        }
 
         _ => return Err(ParseError::Invalid),
     }
@@ -442,10 +506,33 @@ fn parse_escape_standard_terminator(
     Ok(())
 }
 
-fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) -> ParseResult<()> {
-    for group in parameters.split(|byte| *byte == b';') {
-        let mut arguments = Argument::list(group);
+fn parse_escape_space_terminator(
+    params: &[u8],
+    terminator: u8,
+    terminal: &mut impl Terminal,
+) -> ParseResult<()> {
+    match terminator {
+        b'q' => match Argument::single(params)?.with_default(0) {
+            0 | 1 => terminal.set_cursor_style(CursorStyle::blinking(CursorShape::Block)),
+            2 => terminal.set_cursor_style(CursorStyle::steady(CursorShape::Block)),
 
+            3 => terminal.set_cursor_style(CursorStyle::blinking(CursorShape::Underline)),
+            4 => terminal.set_cursor_style(CursorStyle::steady(CursorShape::Underline)),
+
+            5 => terminal.set_cursor_style(CursorStyle::blinking(CursorShape::Bar)),
+            6 => terminal.set_cursor_style(CursorStyle::steady(CursorShape::Bar)),
+
+            _ => return Err(ParseError::Invalid),
+        },
+        _ => return Err(ParseError::Invalid),
+    }
+
+    Ok(())
+}
+
+fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) -> ParseResult<()> {
+    let mut arguments = Argument::list(parameters);
+    loop {
         match arguments.next()?.with_default(0) {
             0 => {
                 terminal.reset_character_style(CharacterStyles::all());
@@ -477,14 +564,16 @@ fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) ->
             9 => terminal.set_character_style(CharacterStyles::STRIKETHROUGH),
             29 => terminal.reset_character_style(CharacterStyles::STRIKETHROUGH),
 
+            // Indexed color
             arg @ 30..=37 => terminal.set_foreground_color(Color::Index(arg as u8 - 30)),
-            arg @ 90..=97 => terminal.set_foreground_color(Color::Index(arg as u8 - 90)),
+            arg @ 90..=97 => terminal.set_foreground_color(Color::Index(8 + arg as u8 - 90)),
             39 => terminal.reset_foreground_color(),
 
             arg @ 40..=47 => terminal.set_background_color(Color::Index(arg as u8 - 30)),
-            arg @ 100..=107 => terminal.set_background_color(Color::Index(arg as u8 - 100)),
+            arg @ 100..=107 => terminal.set_background_color(Color::Index(8 + arg as u8 - 100)),
             49 => terminal.reset_background_color(),
 
+            // RGB color
             38 => match arguments.next()?.with_default(0) {
                 5 => terminal
                     .set_foreground_color(Color::Index(arguments.next()?.with_default(0) as u8)),
@@ -509,6 +598,10 @@ fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) ->
             },
 
             _ => return Err(ParseError::Invalid),
+        }
+
+        if arguments.is_empty() {
+            break;
         }
     }
 
@@ -568,6 +661,10 @@ impl Argument {
             None => default,
             Some(v) => v.get(),
         }
+    }
+
+    pub fn to_option(self) -> Option<u16> {
+        self.value.map(|v| v.get())
     }
 
     pub fn single(parameters: &[u8]) -> ParseResult<Argument> {
@@ -633,5 +730,9 @@ impl ArgumentList<'_> {
                 Argument::single(argument)
             }
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parameters.is_empty()
     }
 }
