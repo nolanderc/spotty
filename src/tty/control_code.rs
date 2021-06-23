@@ -46,6 +46,12 @@ pub trait Terminal {
     /// Set the appearance of the cursor
     fn set_cursor_style(&mut self, style: CursorStyle);
 
+    /// Set the color of the cursor
+    fn set_cursor_color(&mut self, color: crate::color::Color);
+
+    /// Set the color of the cursor to the default
+    fn reset_cursor_color(&mut self);
+
     // === SCROLLING === //
 
     /// Set the area within which content should scroll.
@@ -75,13 +81,13 @@ pub trait Terminal {
     // === COLOR === //
 
     /// Set the color of the foreground
-    fn set_foreground_color(&mut self, color: Color);
+    fn set_foreground_color(&mut self, color: crate::color::Color);
 
     /// Reset the foreground to the default color
     fn reset_foreground_color(&mut self);
 
     /// Set the color of the background
-    fn set_background_color(&mut self, color: Color);
+    fn set_background_color(&mut self, color: crate::color::Color);
 
     /// Reset the background to the default color
     fn reset_background_color(&mut self);
@@ -118,14 +124,6 @@ pub enum ClearRegion {
     ToStart,
     /// Clear everything
     All,
-}
-
-#[derive(Debug, Clone)]
-pub enum Color {
-    /// Use a color from the default palette
-    Index(u8),
-    /// Use a specific RGB color
-    Rgb([u8; 3]),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -338,25 +336,19 @@ fn parse_operating_system_command(
     bytes: ByteIter,
     terminal: &mut impl Terminal,
 ) -> ParseResult<()> {
-    let numbers = util::take_while_in_range(bytes, b'0'..=b'9')?;
     let parameters = util::take_while_in_range(bytes, 0x20..=0x7e)?;
     let terminator = bytes.next().ok_or(ParseError::Incomplete)?;
 
-    if !matches!(terminator, b'\x07') {
+    if !matches!(terminator, b'\x07' | b'\x03') {
         return Err(ParseError::Invalid);
     }
 
-    let parameters = parameters.strip_prefix(b";").ok_or(ParseError::Invalid)?;
+    let mut arguments = ArgumentList::new(parameters);
 
-    if parameters == b"?" {
-        // TODO: this should instead respond with a `TerminalCode::GetWindowTitle` or similar
-        return Err(ParseError::Invalid);
-    }
-
-    match Argument::single(numbers)?.with_default(0) {
+    match arguments.next()?.with_default(0) {
         // Change "icon name" and window title. The former does not apply.
         0 => {
-            let text = std::str::from_utf8(parameters).unwrap();
+            let text = std::str::from_utf8(arguments.next_slice()).unwrap();
             terminal.set_window_title(text);
         }
 
@@ -365,12 +357,14 @@ fn parse_operating_system_command(
 
         // Change window title.
         2 => {
-            let text = std::str::from_utf8(parameters).unwrap();
+            let text = std::str::from_utf8(arguments.next_slice()).unwrap();
             terminal.set_window_title(text);
         }
 
         // Set X-property on top-level window (does not apply)
         3 => {}
+
+        112 => terminal.reset_cursor_color(),
 
         _ => return Err(ParseError::Invalid),
     }
@@ -531,7 +525,9 @@ fn parse_escape_space_terminator(
 }
 
 fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) -> ParseResult<()> {
-    let mut arguments = Argument::list(parameters);
+    use crate::color::Color;
+
+    let mut arguments = ArgumentList::new(parameters);
     loop {
         match arguments.next()?.with_default(0) {
             0 => {
@@ -645,10 +641,6 @@ pub struct Argument {
     value: Option<std::num::NonZeroU16>,
 }
 
-pub struct ArgumentList<'a> {
-    parameters: &'a [u8],
-}
-
 impl Argument {
     fn new(value: u16) -> Argument {
         Argument {
@@ -705,13 +697,17 @@ impl Argument {
 
         Ok(values)
     }
-
-    pub fn list(parameters: &[u8]) -> ArgumentList {
-        ArgumentList { parameters }
-    }
 }
 
-impl ArgumentList<'_> {
+pub struct ArgumentList<'a> {
+    parameters: &'a [u8],
+}
+
+impl<'a> ArgumentList<'a> {
+    pub fn new(parameters: &'a [u8]) -> ArgumentList {
+        ArgumentList { parameters }
+    }
+
     pub fn next(&mut self) -> ParseResult<Argument> {
         let separator = self
             .parameters
@@ -728,6 +724,26 @@ impl ArgumentList<'_> {
                 let argument = self.parameters;
                 self.parameters = &[];
                 Argument::single(argument)
+            }
+        }
+    }
+
+    pub fn next_slice(&mut self) -> &'a [u8] {
+        let separator = self
+            .parameters
+            .iter()
+            .position(|byte| matches!(byte, b':' | b';'));
+
+        match separator {
+            Some(index) => {
+                let (argument, rest) = self.parameters.split_at(index);
+                self.parameters = &rest[1..];
+                argument
+            }
+            None => {
+                let argument = self.parameters;
+                self.parameters = &[];
+                argument
             }
         }
     }

@@ -41,6 +41,12 @@ impl From<&[u8]> for InlineBytes {
     }
 }
 
+impl From<Box<[u8]>> for InlineBytes {
+    fn from(boxed: Box<[u8]>) -> Self {
+        InlineBytes(InlineBytesData::Boxed(boxed))
+    }
+}
+
 impl<const N: usize> From<[u8; N]> for InlineBytes {
     fn from(bytes: [u8; N]) -> Self {
         Self::new(&bytes)

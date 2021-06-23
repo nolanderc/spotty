@@ -119,7 +119,22 @@ impl Terminal {
                     let byte = (ch as u8).to_ascii_lowercase();
                     self.pty.send(byte - b'a' + 1);
                 } else {
-                    eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
+                    match (modifiers, ch) {
+                        (Modifiers::SUPER, 'v') => {
+                            if let Some(clipboard) = self.window.get_clipboard() {
+                                let escaped = clipboard.replace('\x1b', "");
+                                let bytes = escaped.into_boxed_str().into_boxed_bytes();
+                                if self.screen.behaviours.bracketed_paste {
+                                    self.pty.send(b"\x1b[200~");
+                                    self.pty.send(bytes);
+                                    self.pty.send(b"\x1b[201~");
+                                }
+                            }
+                        }
+                        _ => {
+                            eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
+                        }
+                    }
                 }
             }
 
@@ -158,12 +173,14 @@ impl Terminal {
     }
 
     pub fn render(&mut self) {
-        let cursor = if self.screen.behaviours.show_cursor {
-            Some(self.screen.cursor_render_state())
-        } else {
-            None
-        };
+        let palette = &crate::color::DEFAULT_PALETTE;
 
-        self.renderer.render(&self.screen.grid, cursor);
+        let cursor = self.screen.cursor_render_state(palette);
+
+        self.renderer.render(render::RenderState {
+            grid: &self.screen.grid,
+            cursor,
+            palette,
+        });
     }
 }

@@ -150,6 +150,25 @@ impl Window {
         use cocoa::appkit::NSWindow;
         unsafe { NSWindow::backingScaleFactor(self.raw) }
     }
+
+    pub fn get_clipboard(&self) -> Option<String> {
+        use cocoa::appkit::NSPasteboard;
+        use cocoa::base::nil;
+        use cocoa::foundation::NSString;
+
+        unsafe {
+            let pasteboard = NSPasteboard::generalPasteboard(nil);
+            let string = pasteboard.stringForType(cocoa::appkit::NSPasteboardTypeString);
+
+            if string == nil {
+                None
+            } else {
+                let text = string.UTF8String();
+                let bytes = std::slice::from_raw_parts(text as *const u8, string.len());
+                Some(std::str::from_utf8_unchecked(bytes).to_owned())
+            }
+        }
+    }
 }
 
 impl EventLoop {

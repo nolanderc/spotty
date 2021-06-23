@@ -7,6 +7,7 @@ pub struct Screen {
     pub cursor: crate::grid::Position,
     pub saved_cursor: crate::grid::Position,
     pub cursor_style: crate::tty::control_code::CursorStyle,
+    pub cursor_color: crate::color::Color,
 
     pub style: crate::tty::control_code::CharacterStyles,
     pub foreground: crate::color::Color,
@@ -24,6 +25,7 @@ pub struct Screen {
 pub struct Behaviours {
     pub show_cursor: bool,
     pub alternate_buffer: bool,
+    pub bracketed_paste: bool,
 }
 
 impl Default for Behaviours {
@@ -31,6 +33,7 @@ impl Default for Behaviours {
         Behaviours {
             show_cursor: true,
             alternate_buffer: false,
+            bracketed_paste: false,
         }
     }
 }
@@ -46,13 +49,14 @@ impl Screen {
             cursor: crate::grid::Position::new(0, 0),
             saved_cursor: crate::grid::Position::new(0, 0),
             cursor_style: crate::tty::control_code::CursorStyle::DEFAULT,
+            cursor_color: crate::color::DEFAULT_CURSOR,
 
             style: crate::tty::control_code::CharacterStyles::empty(),
             foreground: crate::color::DEFAULT_FOREGROUND,
+
             background: crate::color::DEFAULT_BACKGROUND,
 
             scrolling_region: 0..grid_size[0],
-
             behaviours: Behaviours::default(),
             residual_input: Vec::new(),
         }
@@ -84,12 +88,19 @@ impl Screen {
         self.residual_input.extend_from_slice(residual);
     }
 
-    pub fn cursor_render_state(&self) -> crate::render::CursorState {
-        crate::render::CursorState {
-            position: self.cursor,
-            style: self.cursor_style,
-            color: crate::color::DEFAULT_CURSOR,
-            text_color: crate::color::DEFAULT_CURSOR_TEXT,
+    pub fn cursor_render_state(
+        &self,
+        palette: &crate::color::Palette,
+    ) -> Option<crate::render::CursorState> {
+        if self.behaviours.show_cursor {
+            Some(crate::render::CursorState {
+                position: self.cursor,
+                style: self.cursor_style,
+                color: self.cursor_color,
+                text_color: self.cursor_color.complement(palette),
+            })
+        } else {
+            None
         }
     }
 }
@@ -173,7 +184,8 @@ impl crate::tty::control_code::Terminal for Screen {
             .saturating_add(count)
             .min(self.scrolling_region.end);
 
-        self.grid.copy_rows(clear_end..self.scrolling_region.end, self.cursor.row);
+        self.grid
+            .copy_rows(clear_end..self.scrolling_region.end, self.cursor.row);
 
         let rows_below = self.scrolling_region.end - clear_end;
         let copy_end = self.cursor.row + rows_below;
@@ -244,6 +256,15 @@ impl crate::tty::control_code::Terminal for Screen {
         self.cursor_style = style;
     }
 
+    fn set_cursor_color(&mut self, color: crate::color::Color) {
+        self.cursor_color = color;
+    }
+
+    fn reset_cursor_color(&mut self) {
+        debug!("reset_cursor_color");
+        self.cursor_color = crate::color::DEFAULT_CURSOR;
+    }
+
     fn set_scrolling_region(&mut self, rows: std::ops::Range<u16>) {
         debug!(?rows, "set_scrolling_region");
 
@@ -300,9 +321,9 @@ impl crate::tty::control_code::Terminal for Screen {
         self.style.remove(style);
     }
 
-    fn set_foreground_color(&mut self, color: crate::tty::control_code::Color) {
+    fn set_foreground_color(&mut self, color: crate::color::Color) {
         debug!(?color, "set_foreground_color");
-        self.foreground = self.get_color(color);
+        self.foreground = color;
     }
 
     fn reset_foreground_color(&mut self) {
@@ -310,9 +331,9 @@ impl crate::tty::control_code::Terminal for Screen {
         self.foreground = crate::color::DEFAULT_FOREGROUND;
     }
 
-    fn set_background_color(&mut self, color: crate::tty::control_code::Color) {
+    fn set_background_color(&mut self, color: crate::color::Color) {
         debug!(?color, "set_background_color");
-        self.background = self.get_color(color);
+        self.background = color;
     }
 
     fn reset_background_color(&mut self) {
@@ -342,6 +363,7 @@ impl crate::tty::control_code::Terminal for Screen {
                     std::mem::swap(&mut self.grid, &mut self.alternate_grid);
                 }
             }
+            Behaviour::BracketedPaste => self.behaviours.bracketed_paste = toggle.is_enabled(),
             _ => warn!(?behaviour, ?toggle, "unimplemented behaviour"),
         }
     }
@@ -397,15 +419,6 @@ impl Screen {
             foreground: self.foreground,
             background: self.background,
             style: self.style,
-        }
-    }
-
-    fn get_color(&self, color: crate::tty::control_code::Color) -> crate::color::Color {
-        match color {
-            crate::tty::control_code::Color::Index(index) => {
-                crate::color::DEFAULT_PALETTE[index as usize]
-            }
-            crate::tty::control_code::Color::Rgb(rgb) => rgb.into(),
         }
     }
 }

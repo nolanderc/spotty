@@ -166,21 +166,13 @@ impl Renderer {
         self.glyphs = super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE);
     }
 
-    pub fn render(
-        &mut self,
-        grid: &crate::grid::CharacterGrid,
-        cursor: Option<super::CursorState>,
-    ) {
-        let block_cursor = cursor
-            .as_ref()
-            .filter(|cursor| cursor.style.shape == crate::tty::control_code::CursorShape::Block);
-
-        self.update_grid_buffers(grid, block_cursor);
+    pub fn render(&mut self, state: super::RenderState) {
+        self.update_grid_buffers(&state);
 
         let drawable = self.layer.next_drawable().unwrap();
 
         let command_buffer = self.queue.new_command_buffer();
-        let encoder = Self::create_command_encoder(command_buffer, drawable.texture());
+        let encoder = Self::create_command_encoder(command_buffer, drawable.texture(), &state);
 
         // Setup rendering pipeline
         encoder.set_render_pipeline_state(&self.pipeline);
@@ -189,10 +181,9 @@ impl Renderer {
         self.render_cells(encoder);
         self.render_characters(encoder);
 
-        if block_cursor.is_none() {
-            if let Some(cursor) = cursor {
-                eprintln!("render_cursor");
-                self.render_cursor(encoder, cursor);
+        if let Some(cursor) = state.cursor {
+            if cursor.style.shape != crate::tty::control_code::CursorShape::Block {
+                self.render_cursor(encoder, cursor, state.palette);
             }
         }
 
@@ -204,13 +195,14 @@ impl Renderer {
     fn create_command_encoder<'a>(
         command_buffer: &'a metal::CommandBufferRef,
         target: &metal::TextureRef,
+        state: &super::RenderState,
     ) -> &'a metal::RenderCommandEncoderRef {
         let desc = metal::RenderPassDescriptor::new();
 
         let attachment = desc.color_attachments().object_at(0).unwrap();
         attachment.set_texture(Some(target));
         attachment.set_clear_color({
-            let [r, g, b, a] = crate::color::DEFAULT_BACKGROUND.into_rgba_f64();
+            let [r, g, b, a] = crate::color::DEFAULT_BACKGROUND.into_rgba_f64(state.palette);
             metal::MTLClearColor::new(r, g, b, a)
         });
         attachment.set_load_action(metal::MTLLoadAction::Clear);
@@ -275,8 +267,13 @@ impl Renderer {
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
-    fn render_cursor(&self, encoder: &metal::RenderCommandEncoderRef, cursor: super::CursorState) {
-        let cursor_vertices = self.create_cursor_vertices(cursor);
+    fn render_cursor(
+        &self,
+        encoder: &metal::RenderCommandEncoderRef,
+        cursor: super::CursorState,
+        palette: &crate::color::Palette,
+    ) {
+        let cursor_vertices = self.create_cursor_vertices(cursor, palette);
         encoder.set_fragment_texture(0, Some(&self.white_texture));
         encoder.set_vertex_buffers(
             0,
@@ -290,7 +287,11 @@ impl Renderer {
         );
     }
 
-    fn create_cursor_vertices(&self, cursor: super::CursorState) -> buffer::Buffer<super::Vertex> {
+    fn create_cursor_vertices(
+        &self,
+        cursor: super::CursorState,
+        palette: &crate::color::Palette,
+    ) -> buffer::Buffer<super::Vertex> {
         let [cell_width, cell_height] = crate::font::cell_size(self.glyphs.font());
 
         let [width, height] = match cursor.style.shape {
@@ -305,22 +306,18 @@ impl Renderer {
         let vertices = super::Vertex::quad(
             [x, x + width, y, y - height],
             [0.0, 1.0, 0.0, 1.0],
-            cursor.color.into_rgba_f32(),
+            cursor.color.into_rgba_f32(palette),
         );
 
         buffer::Buffer::with_data(&vertices, &self.device)
     }
 
     // TODO: do this in a compute shader instead
-    fn update_grid_buffers(
-        &mut self,
-        grid: &crate::grid::CharacterGrid,
-        cursor: Option<&super::CursorState>,
-    ) {
+    fn update_grid_buffers(&mut self, state: &super::RenderState) {
         use crate::tty::control_code::CharacterStyles;
 
-        let cols = grid.cols();
-        let rows = grid.rows();
+        let cols = state.grid.cols();
+        let rows = state.grid.rows();
 
         let mut cell_quads = Vec::with_capacity(cols as usize * rows as usize);
         let mut character_quads = Vec::with_capacity(cols as usize * rows as usize);
@@ -330,24 +327,16 @@ impl Renderer {
         let descent = font_metrics.descent;
         let line_height = font_metrics.line_height;
 
-        let invisible = super::CursorState::invisible();
-        let cursor = cursor.unwrap_or(&invisible);
-
         for row in 0..rows {
             for col in 0..cols {
                 let pos = crate::grid::Position::new(row, col);
-                let cell = grid[pos];
+                let cell = state.grid[pos];
 
                 let mut background = cell.background;
                 let mut foreground = cell.foreground;
 
                 if cell.style.contains(CharacterStyles::INVERSE) {
-                    std::mem::swap(&mut background, &mut foreground);
-                }
-
-                if pos == cursor.position {
-                    foreground = cursor.text_color;
-                    background = cursor.color;
+                    std::mem::swap(&mut foreground, &mut background);
                 }
 
                 let cell_left = col as f32 * advance;
@@ -364,14 +353,31 @@ impl Renderer {
                         cell_bottom - line_height,
                     ],
                     [0.0, 0.0, 0.0, 0.0],
-                    background.into_rgba_f32(),
+                    background.into_rgba_f32(state.palette),
                 ));
 
                 character_quads.push(super::Vertex::glyph_quad(
                     self.get_glyph(cell.character),
                     [baseline_x, baseline_y],
-                    foreground.into_rgba_f32(),
+                    foreground.into_rgba_f32(state.palette),
                 ));
+            }
+        }
+
+        if let Some(cursor) = &state.cursor {
+            if cursor.style.shape == crate::tty::control_code::CursorShape::Block {
+                let index = cursor.position.col as usize
+                    + cursor.position.row as usize * state.grid.cols() as usize;
+
+                let cell_color = cursor.color.into_rgba_f32(state.palette);
+                let text_color = cursor.text_color.into_rgba_f32(state.palette);
+
+                cell_quads[index]
+                    .iter_mut()
+                    .for_each(|vertex| vertex.color = cell_color);
+                character_quads[index]
+                    .iter_mut()
+                    .for_each(|vertex| vertex.color = text_color);
             }
         }
 
