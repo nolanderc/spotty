@@ -31,11 +31,17 @@ pub trait Terminal {
 
     fn insert_lines(&mut self, count: u16);
 
+    fn scroll_down(&mut self, count: u16);
+    fn scroll_up(&mut self, count: u16);
+
     /// Move the cursor in the given direction
     fn move_cursor(&mut self, direction: Direction, steps: u16);
 
     /// Sets the position of the cursor relative to the top-left corner (0-indexed)
     fn set_cursor_pos(&mut self, row: u16, col: u16);
+
+    fn set_cursor_row(&mut self, row: u16);
+    fn set_cursor_col(&mut self, col: u16);
 
     /// Saves the current cursor
     fn save_cursor(&mut self);
@@ -462,6 +468,9 @@ fn parse_escape_standard_terminator(
         b'C' => terminal.move_cursor(Right, Argument::single(parameters)?.with_default(1)),
         b'D' => terminal.move_cursor(Left, Argument::single(parameters)?.with_default(1)),
 
+        b'd' => terminal.set_cursor_row(Argument::single(parameters)?.with_default(1) - 1),
+        b'G' => terminal.set_cursor_col(Argument::single(parameters)?.with_default(1) - 1),
+
         b'H' => {
             let [row, col] = Argument::multi(parameters)?;
             terminal.set_cursor_pos(row.with_default(1) - 1, col.with_default(1) - 1)
@@ -484,6 +493,8 @@ fn parse_escape_standard_terminator(
 
         b'L' => terminal.insert_lines(Argument::single(parameters)?.with_default(1)),
         b'M' => terminal.delete_lines(Argument::single(parameters)?.with_default(1)),
+
+        b'S' => terminal.scroll_up(Argument::single(parameters)?.with_default(1)),
 
         b'X' => terminal.erase(Argument::single(parameters)?.with_default(1)),
 
@@ -565,7 +576,7 @@ fn parse_character_attribute(parameters: &[u8], terminal: &mut impl Terminal) ->
             arg @ 90..=97 => terminal.set_foreground_color(Color::Index(8 + arg as u8 - 90)),
             39 => terminal.reset_foreground_color(),
 
-            arg @ 40..=47 => terminal.set_background_color(Color::Index(arg as u8 - 30)),
+            arg @ 40..=47 => terminal.set_background_color(Color::Index(arg as u8 - 40)),
             arg @ 100..=107 => terminal.set_background_color(Color::Index(8 + arg as u8 - 100)),
             49 => terminal.reset_background_color(),
 

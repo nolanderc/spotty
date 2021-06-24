@@ -84,24 +84,6 @@ impl CharacterGrid {
         self.rows - 1
     }
 
-    pub fn scroll_up(&mut self, rows: u16, fill: GridCell) {
-        let width = self.cols as usize;
-        let new_start = width * rows as usize;
-        let new_end = self.cells.len() - new_start;
-
-        self.cells.copy_within(new_start.., 0);
-        self.cells[new_end..].fill(fill);
-    }
-
-    pub fn scroll_down(&mut self, rows: u16, fill: GridCell) {
-        let width = self.cols as usize;
-        let new_start = width * rows as usize;
-        let new_end = self.cells.len() - new_start;
-
-        self.cells.copy_within(..new_end, new_start);
-        self.cells[..new_start].fill(fill);
-    }
-
     pub fn fill_region(
         &mut self,
         row_range: impl std::ops::RangeBounds<u16>,

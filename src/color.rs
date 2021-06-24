@@ -168,13 +168,15 @@ pub const DEFAULT_PALETTE: Palette = {
             };
         }
 
+        let brightness = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+
         const_for!(r in 0..6 {
             const_for!(g in 0..6 {
                 const_for!(b in 0..6 {
                     colors[16 + 36 * r + 6 * g + b] = [
-                        (255 * r / 6) as u8,
-                        (255 * g / 6) as u8,
-                        (255 * b / 6) as u8,
+                        brightness[r],
+                        brightness[g],
+                        brightness[b],
                     ];
                 });
             });
@@ -184,7 +186,7 @@ pub const DEFAULT_PALETTE: Palette = {
     // Grayscale in 24 steps
     let mut i = 0;
     while i < 24 {
-        let gray = 255 * i / 24;
+        let gray = 255 * i / 23;
         colors[232 + i] = [gray as u8; 3];
         i += 1;
     }

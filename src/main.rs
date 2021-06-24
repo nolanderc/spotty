@@ -32,24 +32,7 @@ fn main() {
         },
     );
 
-    let font = Arc::new(load_font(window.scale_factor()));
-    let renderer = render::Renderer::new(&window, font.clone());
-
-    let grid_size = grid::size_in_window(window.inner_size(), font::cell_size(&font));
-    let screen = screen::Screen::new(grid_size);
-
-    let waker = event_loop.create_waker();
-    let pty = tty::Psuedoterminal::connect(waker).unwrap();
-    pty.set_grid_size(screen.grid.size());
-
-    let mut terminal = Terminal {
-        pty,
-        window,
-        waker: event_loop.create_waker(),
-        renderer,
-        font,
-        screen,
-    };
+    let mut terminal = Terminal::new(window, event_loop.create_waker());
 
     event_loop.run(move |event| match event {
         window::Event::Active => {}
@@ -64,8 +47,7 @@ fn main() {
     });
 }
 
-fn load_font(scale_factor: f64) -> font::Font {
-    let font_size = 14.0;
+fn load_font(font_size: f64, scale_factor: f64) -> font::Font {
     font::Font::with_name("Iosevka SS14", font_size * scale_factor).expect("failed to load font")
 }
 
@@ -77,23 +59,57 @@ fn setup_logging() {
 
 pub struct Terminal {
     pty: tty::Psuedoterminal,
+
     window: window::Window,
     waker: window::EventLoopWaker,
+
     renderer: render::Renderer,
 
     font: Arc<font::Font>,
+    font_size: f64,
 
     screen: screen::Screen,
 }
 
 impl Terminal {
+    pub fn new(window: window::Window, waker: window::EventLoopWaker) -> Terminal {
+        let font_size = 14.0;
+
+        let font = Arc::new(load_font(font_size, window.scale_factor()));
+        let renderer = render::Renderer::new(&window, font.clone());
+
+        let grid_size = grid::size_in_window(window.inner_size(), font::cell_size(&font));
+        let screen = screen::Screen::new(grid_size);
+
+        let pty = tty::Psuedoterminal::connect(waker.clone()).unwrap();
+        pty.set_grid_size(screen.grid.size());
+
+        Terminal {
+            pty,
+
+            window,
+            waker,
+
+            renderer,
+
+            font,
+            font_size,
+
+            screen,
+        }
+    }
+
     pub fn resize(&mut self, size: window::PhysicalSize) {
         eprintln!("resize: {}x{}", size.width, size.height);
 
         self.renderer.resize(size);
+        self.update_grid_size();
+    }
 
+    fn update_grid_size(&mut self) {
         let old_grid_size = self.screen.grid.size();
-        let new_grid_size = grid::size_in_window(size, font::cell_size(&self.font));
+        let new_grid_size =
+            grid::size_in_window(self.window.inner_size(), font::cell_size(&self.font));
 
         if old_grid_size != new_grid_size {
             self.pty.set_grid_size(new_grid_size);
@@ -102,9 +118,14 @@ impl Terminal {
     }
 
     pub fn scale_factor_changed(&mut self) {
-        self.font = Arc::new(load_font(self.window.scale_factor()));
-        self.renderer.set_font(self.font.clone());
+        self.reload_font();
         self.resize(self.window.inner_size());
+    }
+
+    fn reload_font(&mut self) {
+        self.font = Arc::new(load_font(self.font_size, self.window.scale_factor()));
+        self.renderer.set_font(self.font.clone());
+        self.update_grid_size();
     }
 
     pub fn key_press(&mut self, key: window::Key, modifiers: window::Modifiers) {
@@ -120,17 +141,9 @@ impl Terminal {
                     self.pty.send(byte - b'a' + 1);
                 } else {
                     match (modifiers, ch) {
-                        (Modifiers::SUPER, 'v') => {
-                            if let Some(clipboard) = self.window.get_clipboard() {
-                                let escaped = clipboard.replace('\x1b', "");
-                                let bytes = escaped.into_boxed_str().into_boxed_bytes();
-                                if self.screen.behaviours.bracketed_paste {
-                                    self.pty.send(b"\x1b[200~");
-                                    self.pty.send(bytes);
-                                    self.pty.send(b"\x1b[201~");
-                                }
-                            }
-                        }
+                        (Modifiers::SUPER, 'v') => self.paste_clipboard(),
+                        (Modifiers::SUPER, '-') => self.decrease_font_size(),
+                        (Modifiers::SUPER, '=') => self.increase_font_size(),
                         _ => {
                             eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
                         }
@@ -148,6 +161,28 @@ impl Terminal {
             window::Key::ArrowDown => self.pty.send(b"\x1b[B"),
             window::Key::ArrowRight => self.pty.send(b"\x1b[C"),
             window::Key::ArrowLeft => self.pty.send(b"\x1b[D"),
+        }
+    }
+
+    fn decrease_font_size(&mut self) {
+        self.font_size = f64::max(6.0, self.font_size / 1.25);
+        self.reload_font();
+    }
+
+    fn increase_font_size(&mut self) {
+        self.font_size = f64::max(6.0, self.font_size * 1.25);
+        self.reload_font();
+    }
+
+    fn paste_clipboard(&mut self) {
+        if let Some(clipboard) = self.window.get_clipboard() {
+            let escaped = clipboard.replace('\x1b', "");
+            let bytes = escaped.into_boxed_str().into_boxed_bytes();
+            if self.screen.behaviours.bracketed_paste {
+                self.pty.send(b"\x1b[200~");
+                self.pty.send(bytes);
+                self.pty.send(b"\x1b[201~");
+            }
         }
     }
 

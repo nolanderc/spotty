@@ -94,7 +94,7 @@ impl Screen {
     ) -> Option<crate::render::CursorState> {
         if self.behaviours.show_cursor {
             Some(crate::render::CursorState {
-                position: self.cursor,
+                position: self.virtual_cursor(),
                 style: self.cursor_style,
                 color: self.cursor_color,
                 text_color: self.cursor_color.complement(palette),
@@ -102,6 +102,21 @@ impl Screen {
         } else {
             None
         }
+    }
+
+    fn virtual_cursor(&self) -> crate::grid::Position {
+        let mut position = self.cursor;
+
+        if position.col >= self.grid.cols() {
+            position.col = 0;
+            position.row += 1;
+        }
+        if position.row >= self.grid.rows() {
+            position.row = self.grid.max_row();
+            position.col = self.grid.max_col();
+        }
+
+        position
     }
 }
 
@@ -143,7 +158,7 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn backspace(&mut self) {
-        trace!("backspace");
+        debug!("backspace");
 
         if self.cursor.col > 0 {
             self.cursor.col -= 1;
@@ -153,13 +168,13 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn carriage_return(&mut self) {
-        trace!("carriage_return");
+        debug!("carriage_return");
 
         self.cursor.col = 0
     }
 
     fn line_feed(&mut self) {
-        trace!("line_feed");
+        debug!("line_feed");
 
         self.advance_row();
     }
@@ -168,10 +183,10 @@ impl crate::tty::control_code::Terminal for Screen {
         trace!("reverse_line_feed");
 
         self.cursor.col = 0;
-        if self.cursor.row > 0 {
-            self.cursor.row += 1;
+        if self.cursor.row > self.scrolling_region.start {
+            self.cursor.row -= 1;
         } else {
-            self.grid.scroll_down(1, self.empty_cell());
+            self.scroll_down(1);
         }
     }
 
@@ -208,6 +223,42 @@ impl crate::tty::control_code::Terminal for Screen {
         self.clear_region(self.cursor.row..clear_end, ..);
     }
 
+    fn scroll_down(&mut self, count: u16) {
+        debug!(?count, "scroll_down");
+
+        let copy_destination = count;
+        let copy_start = self.scrolling_region.start;
+        let copy_end = self.scrolling_region.end.saturating_sub(count);
+
+        if copy_start > copy_end {
+            return;
+        }
+
+        self.grid.copy_rows(copy_start..copy_end, copy_destination);
+
+        let clear_start = self.scrolling_region.start;
+        let clear_end = count;
+        self.clear_region(clear_start..clear_end, ..);
+    }
+
+    fn scroll_up(&mut self, count: u16) {
+        debug!(?count, "scroll_up");
+
+        let copy_destination = self.scrolling_region.start;
+        let copy_start = self.scrolling_region.start + count;
+        let copy_end = self.scrolling_region.end;
+
+        if copy_start > copy_end {
+            return;
+        }
+
+        self.grid.copy_rows(copy_start..copy_end, copy_destination);
+
+        let clear_start = self.scrolling_region.end - count;
+        let clear_end = self.scrolling_region.end;
+        self.clear_region(clear_start..clear_end, ..);
+    }
+
     fn move_cursor(&mut self, direction: crate::tty::control_code::Direction, steps: u16) {
         debug!(?direction, ?steps, "move_cursor");
 
@@ -234,9 +285,17 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn set_cursor_pos(&mut self, row: u16, col: u16) {
-        debug!(?row, ?col, "set_cursor_pos");
+        self.set_cursor_row(row);
+        self.set_cursor_col(col);
+    }
 
+    fn set_cursor_row(&mut self, row: u16) {
+        debug!(?row, "set_cursor_row");
         self.cursor.row = row.min(self.grid.max_row());
+    }
+
+    fn set_cursor_col(&mut self, col: u16) {
+        debug!(?col, "set_cursor_col");
         self.cursor.col = col.min(self.grid.max_col());
     }
 
@@ -380,10 +439,11 @@ impl Screen {
     }
 
     fn advance_row(&mut self) {
-        if self.cursor.row < self.grid.max_row() {
+        if self.cursor.row < self.scrolling_region.end.saturating_sub(1) {
             self.cursor.row += 1;
         } else {
-            self.grid.scroll_up(1, self.empty_cell());
+            use crate::tty::control_code::Terminal;
+            self.scroll_up(1);
         }
     }
 
@@ -395,7 +455,9 @@ impl Screen {
 
         self.grid[self.cursor] = crate::grid::GridCell {
             character: ch,
-            ..self.empty_cell()
+            foreground: self.foreground,
+            background: self.background,
+            style: self.style,
         };
         self.advance_column();
     }
@@ -416,8 +478,8 @@ impl Screen {
     fn empty_cell(&self) -> crate::grid::GridCell {
         crate::grid::GridCell {
             character: ' ',
-            foreground: self.foreground,
-            background: self.background,
+            foreground: crate::color::DEFAULT_FOREGROUND,
+            background: crate::color::DEFAULT_BACKGROUND,
             style: self.style,
         }
     }

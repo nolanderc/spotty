@@ -12,6 +12,7 @@ pub struct EventLoop {
     app: CocoaId,
 }
 
+#[derive(Clone)]
 pub struct EventLoopWaker;
 
 type EventCallback = Box<dyn FnMut(super::Event)>;
