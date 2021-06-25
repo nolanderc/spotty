@@ -68,8 +68,7 @@ impl Screen {
 
         self.cursor = crate::grid::Position::new(0, 0);
 
-        self.scrolling_region.start = self.scrolling_region.start.min(grid_size[0]);
-        self.scrolling_region.end = self.scrolling_region.end.min(grid_size[0]);
+        self.scrolling_region = 0..grid_size[0];
     }
 
     pub fn process_input(&mut self, input: &[u8]) {

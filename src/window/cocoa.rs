@@ -333,11 +333,7 @@ extern "C" fn key_down(_this: &Object, _cmd: Sel, event: CocoaId) {
             0x7e => HANDLER.send(KeyPress(Key::ArrowUp, modifiers)),
 
             _ => {
-                let chars = if modifiers.contains(super::Modifiers::CONTROL) {
-                    event.charactersIgnoringModifiers()
-                } else {
-                    event.characters()
-                };
+                let chars = event.charactersIgnoringModifiers();
 
                 let bytes = chars.UTF8String() as *const u8;
                 let slice = std::slice::from_raw_parts(bytes, chars.len());
@@ -384,8 +380,6 @@ unsafe fn get_event_modifiers(event: CocoaId) -> super::Modifiers {
 
 extern "C" fn window_did_resize(_this: &Object, _cmd: Sel, notification: CocoaId) {
     use cocoa::appkit::{NSView, NSWindow};
-
-    eprintln!("resized");
 
     unsafe {
         let window: CocoaId = objc::msg_send![notification, object];

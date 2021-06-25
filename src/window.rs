@@ -42,6 +42,10 @@ bitflags::bitflags! {
     }
 }
 
+impl Modifiers {
+    pub const EMPTY: Modifiers = Modifiers::empty();
+}
+
 /// A size in physical pixels
 #[derive(Debug, Copy, Clone)]
 pub struct PhysicalSize {

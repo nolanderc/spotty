@@ -69,6 +69,8 @@ pub struct Terminal {
     font_size: f64,
 
     screen: screen::Screen,
+
+    dirty: bool,
 }
 
 impl Terminal {
@@ -96,6 +98,8 @@ impl Terminal {
             font_size,
 
             screen,
+
+            dirty: true,
         }
     }
 
@@ -103,17 +107,18 @@ impl Terminal {
         eprintln!("resize: {}x{}", size.width, size.height);
 
         self.renderer.resize(size);
-        self.update_grid_size();
+        self.update_grid_size(size);
+        self.dirty = true;
     }
 
-    fn update_grid_size(&mut self) {
+    fn update_grid_size(&mut self, window_size: window::PhysicalSize) {
         let old_grid_size = self.screen.grid.size();
-        let new_grid_size =
-            grid::size_in_window(self.window.inner_size(), font::cell_size(&self.font));
+        let new_grid_size = grid::size_in_window(window_size, font::cell_size(&self.font));
 
         if old_grid_size != new_grid_size {
             self.pty.set_grid_size(new_grid_size);
             self.screen.resize_grid(new_grid_size);
+            self.dirty = true;
         }
     }
 
@@ -125,35 +130,47 @@ impl Terminal {
     fn reload_font(&mut self) {
         self.font = Arc::new(load_font(self.font_size, self.window.scale_factor()));
         self.renderer.set_font(self.font.clone());
-        self.update_grid_size();
+        self.update_grid_size(self.window.inner_size());
+        self.dirty = true;
     }
 
     pub fn key_press(&mut self, key: window::Key, modifiers: window::Modifiers) {
+        use window::Modifiers;
+
         match key {
-            window::Key::Char(ch) => {
-                use window::Modifiers;
-                if modifiers.is_empty() || modifiers == Modifiers::SHIFT {
+            window::Key::Char(ch) => match modifiers {
+                Modifiers::EMPTY | Modifiers::SHIFT => {
                     let mut buffer = [0u8; 4];
                     let encoded = ch.encode_utf8(&mut buffer);
                     self.pty.send(encoded.as_bytes());
-                } else if modifiers.contains(Modifiers::CONTROL) && ch.is_ascii_alphabetic() {
+                }
+                _ if modifiers.contains(Modifiers::CONTROL) && ch.is_ascii_alphabetic() => {
                     let byte = (ch as u8).to_ascii_lowercase();
                     self.pty.send(byte - b'a' + 1);
-                } else {
-                    match (modifiers, ch) {
-                        (Modifiers::SUPER, 'v') => self.paste_clipboard(),
-                        (Modifiers::SUPER, '-') => self.decrease_font_size(),
-                        (Modifiers::SUPER, '=') => self.increase_font_size(),
-                        _ => {
-                            eprintln!("{:?} (modifiers = {:?})", ch, modifiers)
-                        }
-                    }
                 }
-            }
+                _ if modifiers.contains(Modifiers::ALT) && ch.is_ascii_alphabetic() => {
+                    self.pty.send([0x1b, ch as u8]);
+                }
+                _ => match (modifiers, ch) {
+                    (Modifiers::SUPER, 'v') => self.paste_clipboard(),
+                    (Modifiers::SUPER, '-') => self.decrease_font_size(),
+                    (Modifiers::SUPER, '=') => self.increase_font_size(),
+                    _ => {
+                        eprintln!("{:?} (modifiers = {:?})", ch, modifiers);
+                        return;
+                    }
+                },
+            },
 
             window::Key::Escape => self.pty.send(b"\x1b"),
 
-            window::Key::Enter => self.pty.send(b"\r"),
+            window::Key::Enter => {
+                if modifiers.contains(Modifiers::ALT) {
+                    self.pty.send(b"\x1b\r")
+                } else {
+                    self.pty.send(b"\r")
+                }
+            }
             window::Key::Backspace => self.pty.send(b"\x08"),
             window::Key::Tab => self.pty.send(b"\t"),
 
@@ -162,6 +179,8 @@ impl Terminal {
             window::Key::ArrowRight => self.pty.send(b"\x1b[C"),
             window::Key::ArrowLeft => self.pty.send(b"\x1b[D"),
         }
+
+        self.dirty = true;
     }
 
     fn decrease_font_size(&mut self) {
@@ -182,6 +201,8 @@ impl Terminal {
                 self.pty.send(b"\x1b[200~");
                 self.pty.send(bytes);
                 self.pty.send(b"\x1b[201~");
+            } else {
+                self.pty.send(bytes);
             }
         }
     }
@@ -192,7 +213,10 @@ impl Terminal {
 
         loop {
             match self.pty.read_timeout(std::time::Duration::from_millis(1)) {
-                Ok(input) => self.screen.process_input(&input),
+                Ok(input) => {
+                    self.screen.process_input(&input);
+                    self.dirty = true;
+                }
                 Err(tty::TryReadError::Empty) => break,
                 Err(tty::TryReadError::Closed) => {
                     self.window.close();
@@ -208,14 +232,22 @@ impl Terminal {
     }
 
     pub fn render(&mut self) {
-        let palette = &crate::color::DEFAULT_PALETTE;
+        if self.dirty {
+            let palette = &crate::color::DEFAULT_PALETTE;
 
-        let cursor = self.screen.cursor_render_state(palette);
+            let cursor = self.screen.cursor_render_state(palette);
 
-        self.renderer.render(render::RenderState {
-            grid: &self.screen.grid,
-            cursor,
-            palette,
-        });
+            let start = std::time::Instant::now();
+
+            self.renderer.render(render::RenderState {
+                grid: &self.screen.grid,
+                cursor,
+                palette,
+            });
+
+            eprintln!("render: {:.2} ms", start.elapsed().as_secs_f64() * 1e3);
+
+            self.dirty = false;
+        }
     }
 }
