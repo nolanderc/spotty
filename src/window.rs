@@ -27,6 +27,7 @@ pub enum Key {
     Enter,
     Backspace,
     Tab,
+    Delete,
     ArrowLeft,
     ArrowRight,
     ArrowUp,

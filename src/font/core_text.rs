@@ -1,17 +1,66 @@
+use std::sync::Arc;
+
 pub struct Font {
     cascade: Vec<core_text::font::CTFont>,
     metrics: super::FontMetrics,
 }
 
 impl Font {
-    pub fn with_name(name: &str, pt_size: f64) -> Option<Font> {
+    pub fn collection(name: &str, pt_size: f64) -> Option<super::FontCollection> {
         let family = core_text::font_collection::create_for_family(name)?;
         let descriptors = family.get_descriptors()?;
-        let descriptor = descriptors
+        let fonts = descriptors
             .into_iter()
-            .find(|desc| desc.style_name() == "Regular")?;
+            .map(|desc| core_text::font::new_from_descriptor(&desc, pt_size));
 
-        let font = core_text::font::new_from_descriptor(&descriptor, pt_size);
+        let mut regular = None;
+        let mut bold = None;
+        let mut italic = None;
+
+        for font in fonts {
+            use core_text::font_descriptor::SymbolicTraitAccessors;
+
+            let traits = font.symbolic_traits();
+            if traits.is_expanded()
+                || traits.is_condensed()
+                || traits.is_vertical()
+                || !traits.is_monospace()
+            {
+                continue;
+            }
+
+            let mut style_name = font.style_name();
+            style_name.make_ascii_lowercase();
+            match style_name.as_str().trim() {
+                "regular" => regular = Some(Self::from_ct_font(font)),
+                "bold" => bold = Some(Self::from_ct_font(font)),
+                "italic" => italic = Some(Self::from_ct_font(font)),
+
+                _ => match (traits.is_bold(), traits.is_italic()) {
+                    (false, false) if regular.is_none() => regular = Some(Self::from_ct_font(font)),
+                    (true, false) if bold.is_none() => bold = Some(Self::from_ct_font(font)),
+                    (false, true) if italic.is_none() => italic = Some(Self::from_ct_font(font)),
+                    _ => {}
+                },
+            }
+        }
+
+        let regular = regular.map(Arc::new)?;
+        let bold = bold.map(Arc::new).unwrap_or_else(|| Arc::clone(&regular));
+        let italic = italic.map(Arc::new).unwrap_or_else(|| Arc::clone(&regular));
+
+        core_text::font_descriptor::debug_descriptor(&regular.cascade[0].copy_descriptor());
+        core_text::font_descriptor::debug_descriptor(&bold.cascade[0].copy_descriptor());
+        core_text::font_descriptor::debug_descriptor(&italic.cascade[0].copy_descriptor());
+
+        Some(super::FontCollection {
+            regular,
+            bold,
+            italic,
+        })
+    }
+
+    fn from_ct_font(font: core_text::font::CTFont) -> Font {
         let metrics = Self::extract_metrics(&font);
 
         let languages = core_foundation::array::CFArray::from_CFTypes(&[
@@ -20,13 +69,13 @@ impl Font {
         let fallbacks = core_text::font::cascade_list_for_languages(&font, &languages);
         let fallback_fonts = fallbacks
             .into_iter()
-            .map(|descriptor| core_text::font::new_from_descriptor(&descriptor, pt_size));
+            .map(|descriptor| core_text::font::new_from_descriptor(&descriptor, font.pt_size()));
 
         let mut cascade = Vec::with_capacity(1 + fallbacks.len() as usize);
-        cascade.push(font);
         cascade.extend(fallback_fonts);
+        cascade.insert(0, font);
 
-        Some(Font { cascade, metrics })
+        Font { cascade, metrics }
     }
 
     fn extract_metrics(font: &core_text::font::CTFont) -> super::FontMetrics {

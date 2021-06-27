@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 pub struct GlyphCache {
-    font: std::sync::Arc<crate::font::Font>,
+    font: crate::font::FontCollection,
     atlas: super::texture_atlas::TextureAtlas,
-    glyphs: HashMap<char, Glyph>,
+    glyphs: HashMap<(char, crate::font::Style), Glyph>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -20,7 +20,7 @@ pub enum RasterizationError {
 }
 
 impl GlyphCache {
-    pub fn new(font: std::sync::Arc<crate::font::Font>, atlas_size: usize) -> GlyphCache {
+    pub fn new(font: crate::font::FontCollection, atlas_size: usize) -> GlyphCache {
         GlyphCache {
             font,
             atlas: super::texture_atlas::TextureAtlas::new(atlas_size),
@@ -28,19 +28,22 @@ impl GlyphCache {
         }
     }
 
-    pub fn font(&self) -> &crate::font::Font {
+    pub fn font(&self) -> &crate::font::FontCollection {
         &self.font
     }
 
-    pub fn get(&self, ch: char) -> Option<Glyph> {
-        self.glyphs.get(&ch).copied()
+    pub fn get(&self, ch: char, style: crate::font::Style) -> Option<Glyph> {
+        self.glyphs.get(&(ch, style)).copied()
     }
 
-    pub fn rasterize(&mut self, ch: char) -> Result<(Glyph, Vec<[u8; 4]>), RasterizationError> {
-        let rasterized = self
-            .font
-            .rasterize(ch)
-            .ok_or(RasterizationError::MissingGlyph)?;
+    pub fn rasterize(
+        &mut self,
+        ch: char,
+        style: crate::font::Style,
+    ) -> Result<(Glyph, Vec<[u8; 4]>), RasterizationError> {
+        let font = self.font.get_with_style(style);
+
+        let rasterized = font.rasterize(ch).ok_or(RasterizationError::MissingGlyph)?;
 
         let offset = self
             .atlas
@@ -59,7 +62,7 @@ impl GlyphCache {
             metrics: rasterized.metrics,
         };
 
-        self.glyphs.insert(ch, glyph);
+        self.glyphs.insert((ch, style), glyph);
 
         Ok((glyph, rasterized.bitmap.pixels))
     }

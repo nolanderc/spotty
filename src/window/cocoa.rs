@@ -176,7 +176,7 @@ impl EventLoop {
     pub fn new() -> EventLoop {
         use cocoa::appkit::{NSApplication, NSMenu, NSMenuItem};
         use cocoa::base::nil;
-        use cocoa::foundation::{NSAutoreleasePool, NSProcessInfo, NSString};
+        use cocoa::foundation::NSAutoreleasePool;
 
         unsafe {
             let _pool = NSAutoreleasePool::new(nil);
@@ -194,6 +194,8 @@ impl EventLoop {
 
             // create Application menu
             let app_menu = NSMenu::new(nil).autorelease();
+
+            /*
             let quit_prefix = NSString::alloc(nil).init_str("Quit ");
             let quit_title =
                 quit_prefix.stringByAppendingString_(NSProcessInfo::processInfo(nil).processName());
@@ -203,6 +205,8 @@ impl EventLoop {
                 .initWithTitle_action_keyEquivalent_(quit_title, quit_action, quit_key)
                 .autorelease();
             app_menu.addItem_(quit_item);
+            */
+
             app_menu_item.setSubmenu_(app_menu);
 
             EventLoop { app }
@@ -326,6 +330,8 @@ extern "C" fn key_down(_this: &Object, _cmd: Sel, event: CocoaId) {
             0x24 | 0x4c => HANDLER.send(KeyPress(Key::Enter, modifiers)),
             0x33 => HANDLER.send(KeyPress(Key::Backspace, modifiers)),
             0x30 => HANDLER.send(KeyPress(Key::Tab, modifiers)),
+
+            0x75 => HANDLER.send(KeyPress(Key::Delete, modifiers)),
 
             0x7b => HANDLER.send(KeyPress(Key::ArrowLeft, modifiers)),
             0x7c => HANDLER.send(KeyPress(Key::ArrowRight, modifiers)),

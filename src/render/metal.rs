@@ -31,7 +31,7 @@ const TEXTURE_FORMAT: metal::MTLPixelFormat = metal::MTLPixelFormat::RGBA8Unorm;
 impl Renderer {
     pub fn new(
         window: &crate::window::cocoa::Window,
-        font: std::sync::Arc<crate::font::Font>,
+        font: crate::font::FontCollection,
     ) -> Renderer {
         let device = metal::Device::system_default().unwrap();
         let queue = device.new_command_queue();
@@ -162,7 +162,7 @@ impl Renderer {
         });
     }
 
-    pub fn set_font(&mut self, font: std::sync::Arc<crate::font::Font>) {
+    pub fn set_font(&mut self, font: crate::font::FontCollection) {
         self.glyphs = super::glyph_cache::GlyphCache::new(font, super::FONT_ATLAS_SIZE);
     }
 
@@ -292,7 +292,7 @@ impl Renderer {
         cursor: super::CursorState,
         palette: &crate::color::Palette,
     ) -> buffer::Buffer<super::Vertex> {
-        let [cell_width, cell_height] = crate::font::cell_size(self.glyphs.font());
+        let [cell_width, cell_height] = crate::font::cell_size(&self.glyphs.font().regular);
 
         let [width, height] = match cursor.style.shape {
             crate::tty::control_code::CursorShape::Block => [cell_width, cell_height],
@@ -322,7 +322,7 @@ impl Renderer {
         let mut cell_quads = Vec::with_capacity(cols as usize * rows as usize);
         let mut character_quads = Vec::with_capacity(cols as usize * rows as usize);
 
-        let font_metrics = *self.glyphs.font().metrics();
+        let font_metrics = *self.glyphs.font().regular.metrics();
         let advance = font_metrics.advance;
         let descent = font_metrics.descent;
         let line_height = font_metrics.line_height;
@@ -357,7 +357,7 @@ impl Renderer {
                 ));
 
                 character_quads.push(super::Vertex::glyph_quad(
-                    self.get_glyph(cell.character),
+                    self.get_glyph(cell.character, cell.style),
                     [baseline_x, baseline_y],
                     foreground.into_rgba_f32(state.palette),
                 ));
@@ -387,9 +387,23 @@ impl Renderer {
             .update(bytemuck::cast_slice(&character_quads), &self.device);
     }
 
-    fn get_glyph(&mut self, ch: char) -> super::glyph_cache::Glyph {
-        self.glyphs.get(ch).unwrap_or_else(|| {
-            let (glyph, pixels) = self.glyphs.rasterize(ch).unwrap();
+    fn get_glyph(
+        &mut self,
+        ch: char,
+        styles: crate::tty::control_code::CharacterStyles,
+    ) -> super::glyph_cache::Glyph {
+        use crate::tty::control_code::CharacterStyles;
+
+        let style = if styles.contains(CharacterStyles::ITALIC) {
+            crate::font::Style::Italic
+        } else if styles.contains(CharacterStyles::BOLD) {
+            crate::font::Style::Bold
+        } else {
+            crate::font::Style::Regular
+        };
+
+        self.glyphs.get(ch, style).unwrap_or_else(|| {
+            let (glyph, pixels) = self.glyphs.rasterize(ch, style).unwrap();
 
             let region = metal::MTLRegion::new_2d(
                 glyph.offset[0] as u64,

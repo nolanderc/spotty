@@ -1,7 +1,9 @@
 mod color;
+mod config;
 mod font;
 mod grid;
 mod inline;
+mod log;
 mod render;
 mod screen;
 mod tty;
@@ -10,19 +12,8 @@ mod window;
 #[macro_use]
 extern crate tracing;
 
-use std::sync::Arc;
-
-#[derive(Debug)]
-struct Foo;
-
-impl Drop for Foo {
-    fn drop(&mut self) {
-        eprintln!("drop Foo")
-    }
-}
-
 fn main() {
-    setup_logging();
+    log::init();
 
     let event_loop = window::EventLoop::new();
     let window = window::Window::new(
@@ -47,14 +38,8 @@ fn main() {
     });
 }
 
-fn load_font(font_size: f64, scale_factor: f64) -> font::Font {
-    font::Font::with_name("Iosevka SS14", font_size * scale_factor).expect("failed to load font")
-}
-
-fn setup_logging() {
-    use tracing_subscriber::{EnvFilter, FmtSubscriber};
-    let env_filter = EnvFilter::new(std::env::var("RUST_LOG").as_deref().unwrap_or("info"));
-    FmtSubscriber::builder().with_env_filter(env_filter).init();
+fn load_font(font_size: f64, scale_factor: f64) -> font::FontCollection {
+    font::Font::collection("Iosevka SS14", font_size * scale_factor).expect("failed to load font")
 }
 
 pub struct Terminal {
@@ -65,7 +50,7 @@ pub struct Terminal {
 
     renderer: render::Renderer,
 
-    font: Arc<font::Font>,
+    font_collection: font::FontCollection,
     font_size: f64,
 
     screen: screen::Screen,
@@ -77,10 +62,11 @@ impl Terminal {
     pub fn new(window: window::Window, waker: window::EventLoopWaker) -> Terminal {
         let font_size = 14.0;
 
-        let font = Arc::new(load_font(font_size, window.scale_factor()));
-        let renderer = render::Renderer::new(&window, font.clone());
+        let font_collection = load_font(font_size, window.scale_factor());
+        let renderer = render::Renderer::new(&window, font_collection.clone());
 
-        let grid_size = grid::size_in_window(window.inner_size(), font::cell_size(&font));
+        let cell_size = font::cell_size(&font_collection.regular);
+        let grid_size = grid::size_in_window(window.inner_size(), cell_size);
         let screen = screen::Screen::new(grid_size);
 
         let pty = tty::Psuedoterminal::connect(waker.clone()).unwrap();
@@ -94,7 +80,7 @@ impl Terminal {
 
             renderer,
 
-            font,
+            font_collection,
             font_size,
 
             screen,
@@ -112,8 +98,10 @@ impl Terminal {
     }
 
     fn update_grid_size(&mut self, window_size: window::PhysicalSize) {
+        let cell_size = font::cell_size(&self.font_collection.regular);
+        let new_grid_size = grid::size_in_window(window_size, cell_size);
+
         let old_grid_size = self.screen.grid.size();
-        let new_grid_size = grid::size_in_window(window_size, font::cell_size(&self.font));
 
         if old_grid_size != new_grid_size {
             self.pty.set_grid_size(new_grid_size);
@@ -128,14 +116,23 @@ impl Terminal {
     }
 
     fn reload_font(&mut self) {
-        self.font = Arc::new(load_font(self.font_size, self.window.scale_factor()));
-        self.renderer.set_font(self.font.clone());
+        self.font_collection = load_font(self.font_size, self.window.scale_factor());
+        self.renderer.set_font(self.font_collection.clone());
         self.update_grid_size(self.window.inner_size());
         self.dirty = true;
     }
 
-    pub fn key_press(&mut self, key: window::Key, modifiers: window::Modifiers) {
+    pub fn key_press(&mut self, key: window::Key, mut modifiers: window::Modifiers) {
         use window::Modifiers;
+
+        const SWAP_SUPER_WITH_ALT: bool = true;
+
+        if SWAP_SUPER_WITH_ALT {
+            let sup = modifiers.contains(Modifiers::SUPER);
+            let alt = modifiers.contains(Modifiers::ALT);
+            modifiers.set(Modifiers::SUPER, alt);
+            modifiers.set(Modifiers::ALT, sup);
+        }
 
         match key {
             window::Key::Char(ch) => match modifiers {
@@ -173,6 +170,7 @@ impl Terminal {
             }
             window::Key::Backspace => self.pty.send(b"\x08"),
             window::Key::Tab => self.pty.send(b"\t"),
+            window::Key::Delete => self.pty.send(b"\x1b[3~"),
 
             window::Key::ArrowUp => self.pty.send(b"\x1b[A"),
             window::Key::ArrowDown => self.pty.send(b"\x1b[B"),
@@ -237,15 +235,11 @@ impl Terminal {
 
             let cursor = self.screen.cursor_render_state(palette);
 
-            let start = std::time::Instant::now();
-
             self.renderer.render(render::RenderState {
                 grid: &self.screen.grid,
                 cursor,
                 palette,
             });
-
-            eprintln!("render: {:.2} ms", start.elapsed().as_secs_f64() * 1e3);
 
             self.dirty = false;
         }

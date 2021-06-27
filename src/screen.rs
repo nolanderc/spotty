@@ -127,7 +127,7 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn text(&mut self, text: &str) {
-        debug!(?text);
+        trace!(?text);
 
         for ch in text.chars() {
             self.insert_char(ch);
@@ -157,7 +157,7 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn backspace(&mut self) {
-        debug!("backspace");
+        trace!("backspace");
 
         if self.cursor.col > 0 {
             self.cursor.col -= 1;
@@ -167,13 +167,13 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn carriage_return(&mut self) {
-        debug!("carriage_return");
+        trace!("carriage_return");
 
         self.cursor.col = 0
     }
 
     fn line_feed(&mut self) {
-        debug!("line_feed");
+        trace!("line_feed");
 
         self.advance_row();
     }
@@ -225,7 +225,7 @@ impl crate::tty::control_code::Terminal for Screen {
     fn scroll_down(&mut self, count: u16) {
         debug!(?count, "scroll_down");
 
-        let copy_destination = count;
+        let copy_destination = self.scrolling_region.start.saturating_add(count);
         let copy_start = self.scrolling_region.start;
         let copy_end = self.scrolling_region.end.saturating_sub(count);
 
@@ -236,7 +236,7 @@ impl crate::tty::control_code::Terminal for Screen {
         self.grid.copy_rows(copy_start..copy_end, copy_destination);
 
         let clear_start = self.scrolling_region.start;
-        let clear_end = count;
+        let clear_end = copy_destination;
         self.clear_region(clear_start..clear_end, ..);
     }
 
@@ -284,8 +284,9 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn set_cursor_pos(&mut self, row: u16, col: u16) {
-        self.set_cursor_row(row);
-        self.set_cursor_col(col);
+        debug!(?row, ?col, "set_cursor_pos");
+        self.cursor.row = row.min(self.grid.max_row());
+        self.cursor.col = col.min(self.grid.max_col());
     }
 
     fn set_cursor_row(&mut self, row: u16) {
@@ -370,32 +371,32 @@ impl crate::tty::control_code::Terminal for Screen {
     }
 
     fn set_character_style(&mut self, style: crate::tty::control_code::CharacterStyles) {
-        debug!(?style, "set_character_style");
+        trace!(?style, "set_character_style");
         self.style.insert(style);
     }
 
     fn reset_character_style(&mut self, style: crate::tty::control_code::CharacterStyles) {
-        debug!(?style, "reset_character_style");
+        trace!(?style, "reset_character_style");
         self.style.remove(style);
     }
 
     fn set_foreground_color(&mut self, color: crate::color::Color) {
-        debug!(?color, "set_foreground_color");
+        trace!(?color, "set_foreground_color");
         self.foreground = color;
     }
 
     fn reset_foreground_color(&mut self) {
-        debug!("reset_foreground_color");
+        trace!("reset_foreground_color");
         self.foreground = crate::color::DEFAULT_FOREGROUND;
     }
 
     fn set_background_color(&mut self, color: crate::color::Color) {
-        debug!(?color, "set_background_color");
+        trace!(?color, "set_background_color");
         self.background = color;
     }
 
     fn reset_background_color(&mut self) {
-        debug!("reset_background_color");
+        trace!("reset_background_color");
         self.background = crate::color::DEFAULT_BACKGROUND;
     }
 
